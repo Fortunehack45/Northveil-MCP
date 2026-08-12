@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: northveil-mcp-server
+    env: node
+    buildCommand: cd mcp-server && npm install && npm run build
+    startCommand: cd mcp-server && npm start
+    envVars:
+      - key: PORT
+        value: 3001
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
