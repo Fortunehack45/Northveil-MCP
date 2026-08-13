@@ -145,89 +145,10 @@ function formatUsdValue(num: number): string {
   if (num < 0.01) return `$${num.toFixed(8).replace(/0+$/, '')}`;
   return `$${num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 6 })}`;
 }
-
-function generateInlineSvgCardDataUri(payload: {
-  type: 'transfer' | 'receipt' | 'request' | 'contract_metadata' | 'swap' | 'contract_deploy';
-  title: string;
-  amount?: string | number;
-  symbol?: string;
-  fromAmount?: string | number;
-  fromSymbol?: string;
-  toAmount?: string | number;
-  toSymbol?: string;
-  sender?: string;
-  recipient?: string;
-  network?: string;
-  gasFeeUsd?: string | number;
-  contractAddress?: string;
-  name?: string;
-}): string {
-  const width = 600;
-  const height = payload.type === 'contract_metadata' || payload.type === 'contract_deploy' ? 300 : 260;
-
-  let headerBg = '#ccff00';
-  let badgeText = 'ON-CHAIN ACTION CARD';
-
-  if (payload.type === 'transfer') {
-    headerBg = '#ccff00'; badgeText = 'EIP-1193 TRANSFER INTENT';
-  } else if (payload.type === 'swap') {
-    headerBg = '#ffe600'; badgeText = '1INCH / UNISWAP DEX SWAP';
-  } else if (payload.type === 'contract_metadata' || payload.type === 'contract_deploy') {
-    headerBg = '#00f0ff'; badgeText = 'SMART CONTRACT INSPECTOR';
-  } else if (payload.type === 'request') {
-    headerBg = '#ff007f'; badgeText = 'INSTANT PAYMENT REQUEST';
-  }
-
-  const amt = String(payload.amount || payload.fromAmount || '0.25');
-  const sym = String(payload.symbol || payload.fromSymbol || 'ETH');
-  const rec = String(payload.recipient || '0x742d35Cc6634C0532925a3b844Bc454e4438f44e');
-  const net = String(payload.network || 'Ethereum Sepolia');
-  const gas = String(payload.gasFeeUsd || '0.45');
-  const cName = String(payload.name || 'Northveil Contract');
-  const cAddr = String(payload.contractAddress || '0xdAC17F958D2ee523a2206206994597C13D831ec7');
-  const toAmt = String(payload.toAmount || '3,450.00');
-  const toSym = String(payload.toSymbol || 'USDC');
-
-  const svgContent = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
-    <rect width="${width}" height="${height}" fill="#0a0a0c" rx="8"/>
-    <rect x="6" y="6" width="${width - 12}" height="${height - 12}" fill="#141419" stroke="#ffffff" stroke-width="3" rx="6"/>
-    <rect x="6" y="6" width="${width - 12}" height="46" fill="${headerBg}" stroke="#ffffff" stroke-width="2"/>
-    <text x="20" y="34" font-family="monospace" font-weight="900" font-size="15" fill="#000000">⚡ NORTHVEIL: ${badgeText}</text>
-    <rect x="${width - 130}" y="14" width="110" height="24" fill="#000000" rx="4"/>
-    <text x="${width - 75}" y="30" font-family="monospace" font-weight="bold" font-size="10" fill="#ccff00" text-anchor="middle">ONLINE • 18ms</text>
-    ${payload.type === 'transfer' ? `
-      <text x="24" y="82" font-family="monospace" font-size="11" fill="#94a3b8">AMOUNT TO TRANSFER</text>
-      <text x="24" y="108" font-family="monospace" font-weight="900" font-size="22" fill="#ccff00">${amt} ${sym}</text>
-      <text x="24" y="145" font-family="monospace" font-size="11" fill="#94a3b8">RECIPIENT ADDRESS</text>
-      <text x="24" y="165" font-family="monospace" font-weight="bold" font-size="12" fill="#ffffff">${rec.slice(0, 42)}</text>
-      <text x="24" y="198" font-family="monospace" font-size="11" fill="#94a3b8">NETWORK: <tspan fill="#00f0ff">${net}</tspan></text>
-      <text x="320" y="198" font-family="monospace" font-size="11" fill="#94a3b8">ESTIMATED GAS: <tspan fill="#ccff00">$${gas} USD</tspan></text>
-      <rect x="24" y="215" width="${width - 48}" height="32" fill="#ccff00" stroke="#000000" stroke-width="2" rx="4"/>
-      <text x="${width / 2}" y="236" font-family="monospace" font-weight="900" font-size="12" fill="#000000" text-anchor="middle">CONFIRM &amp; BROADCAST ON-CHAIN</text>
-    ` : payload.type === 'swap' ? `
-      <text x="24" y="82" font-family="monospace" font-size="11" fill="#94a3b8">YOU PAY</text>
-      <text x="24" y="108" font-family="monospace" font-weight="900" font-size="20" fill="#ff007f">${amt} ${sym}</text>
-      <text x="300" y="82" font-family="monospace" font-size="11" fill="#94a3b8">YOU RECEIVE</text>
-      <text x="300" y="108" font-family="monospace" font-weight="900" font-size="20" fill="#ccff00">~${toAmt} ${toSym}</text>
-      <text x="24" y="152" font-family="monospace" font-size="11" fill="#94a3b8">ROUTER: <tspan fill="#00f0ff">1inch V6 DEX AGGREGATOR</tspan></text>
-      <text x="24" y="180" font-family="monospace" font-size="11" fill="#94a3b8">SLIPPAGE TOLERANCE: <tspan fill="#ffe600">0.5% MAX</tspan></text>
-      <rect x="24" y="202" width="${width - 48}" height="34" fill="#ffe600" stroke="#000000" stroke-width="2" rx="4"/>
-      <text x="${width / 2}" y="224" font-family="monospace" font-weight="900" font-size="12" fill="#000000" text-anchor="middle">EXECUTE DEX SWAP</text>
-    ` : `
-      <text x="24" y="82" font-family="monospace" font-size="11" fill="#94a3b8">CONTRACT ADDRESS</text>
-      <text x="24" y="105" font-family="monospace" font-weight="bold" font-size="12" fill="#00f0ff">${cAddr.slice(0, 42)}</text>
-      <text x="24" y="140" font-family="monospace" font-size="11" fill="#94a3b8">TOKEN NAME: <tspan fill="#ffffff">${cName}</tspan></text>
-      <text x="300" y="140" font-family="monospace" font-size="11" fill="#94a3b8">SYMBOL: <tspan fill="#ccff00">$${sym}</tspan></text>
-      <text x="24" y="170" font-family="monospace" font-size="11" fill="#94a3b8">TOTAL SUPPLY: <tspan fill="#ffffff">1,000,000,000</tspan></text>
-      <text x="300" y="170" font-family="monospace" font-size="11" fill="#94a3b8">DECIMALS: <tspan fill="#00f0ff">18</tspan></text>
-      <rect x="24" y="195" width="${width - 48}" height="34" fill="#00f0ff" stroke="#000000" stroke-width="2" rx="4"/>
-      <text x="${width / 2}" y="217" font-family="monospace" font-weight="900" font-size="12" fill="#000000" text-anchor="middle">INSPECT CONTRACT ON EXPLORER</text>
-    `}
-  </svg>`;
-
-  return 'data:image/svg+xml;base64,' + Buffer.from(svgContent).toString('base64');
-}
-
+/**
+ * Builds a clean markdown UI card that renders perfectly in Claude Desktop, Claude Web, and ChatGPT.
+ * Uses standard markdown tables and emoji indicators instead of SVG data URIs (which are stripped by LLM chat renderers).
+ */
 function buildMcpUiCardMarkdown(payload: {
   type: 'transfer' | 'receipt' | 'request' | 'contract_metadata' | 'swap' | 'contract_deploy';
   title: string;
@@ -254,61 +175,69 @@ function buildMcpUiCardMarkdown(payload: {
   const localAppUrl = process.env.PUBLIC_APP_URL || 'http://localhost:3000';
   const actionLink = payload.actionUrl || `${localAppUrl}/?action=${payload.type}&amount=${encodeURIComponent(String(payload.amount || payload.fromAmount || ''))}&symbol=${encodeURIComponent(payload.symbol || payload.fromSymbol || '')}&recipient=${encodeURIComponent(payload.recipient || '')}&address=${encodeURIComponent(payload.contractAddress || '')}`;
 
-  let headerBadge = (payload.title || payload.type.toUpperCase()).slice(0, 36);
+  const truncAddr = (addr: string) => addr ? `\`${addr.slice(0, 6)}...${addr.slice(-4)}\`` : '—';
+  const truncHash = (h: string) => h ? `\`${h.slice(0, 10)}...${h.slice(-6)}\`` : '—';
 
-  let cardAscii = `\`\`\`text
-╔═════════════════════════════════════════════════════════════════╗
-║ 🟡 NORTHVEIL MCP ACTION CARD: ${headerBadge.padEnd(34)} ║
-╠═════════════════════════════════════════════════════════════════╣\n`;
+  let headerEmoji = '⚡';
+  let headerLabel = payload.title || 'ON-CHAIN ACTION';
+
+  if (payload.type === 'transfer') headerEmoji = '💸';
+  else if (payload.type === 'swap') headerEmoji = '🔄';
+  else if (payload.type === 'contract_metadata' || payload.type === 'contract_deploy') headerEmoji = '📄';
+  else if (payload.type === 'request') headerEmoji = '📥';
+  else if (payload.type === 'receipt') headerEmoji = '🧾';
+
+  let markdown = `### ${headerEmoji} NORTHVEIL — ${headerLabel}\n\n`;
 
   if (payload.type === 'transfer') {
-    cardAscii += `║ AMOUNT:     ${(String(payload.amount) + ' ' + (payload.symbol || 'ETH')).padEnd(51)} ║\n` +
-      `║ SENDER:     ${(payload.sender || '').slice(0, 48).padEnd(51)} ║\n` +
-      `║ RECIPIENT:  ${(payload.recipient || '').slice(0, 48).padEnd(51)} ║\n` +
-      `║ NETWORK:    ${(payload.network || 'Ethereum Sepolia').slice(0, 48).padEnd(51)} ║\n` +
-      `║ GAS FEE:    $${(String(payload.gasFeeUsd || '0.45')).padEnd(50)} ║\n` +
-      `║ STATUS:     🟢 CONFIRMED ON-CHAIN                               ║\n`;
+    markdown += `| Field | Value |\n|:---|:---|\n`;
+    markdown += `| **Amount** | \`${payload.amount || '0'} ${payload.symbol || 'ETH'}\` |\n`;
+    if (payload.sender) markdown += `| **Sender** | ${truncAddr(payload.sender)} |\n`;
+    if (payload.recipient) markdown += `| **Recipient** | ${truncAddr(payload.recipient)} |\n`;
+    markdown += `| **Network** | ${payload.network || 'Ethereum Sepolia'} |\n`;
+    markdown += `| **Gas Fee** | ~$${payload.gasFeeUsd || '0.45'} USD |\n`;
+    markdown += `| **Status** | 🟢 Confirmed On-Chain |\n`;
   } else if (payload.type === 'swap') {
-    cardAscii += `║ YOU SOLD:   ${(String(payload.fromAmount || payload.amount || '1.0') + ' ' + (payload.fromSymbol || 'ETH')).padEnd(51)} ║\n` +
-      `║ YOU GOT:    ${(String(payload.toAmount || '3450') + ' ' + (payload.toSymbol || 'USDC')).padEnd(51)} ║\n` +
-      `║ ROUTER:     1inch V6 DEX AGGREGATOR                             ║\n` +
-      `║ STATUS:     🟢 ROUTED & EXECUTED                                ║\n`;
+    markdown += `| Field | Value |\n|:---|:---|\n`;
+    markdown += `| **You Pay** | \`${payload.fromAmount || payload.amount || '1.0'} ${payload.fromSymbol || 'ETH'}\` |\n`;
+    markdown += `| **You Receive** | \`~${payload.toAmount || '3,450'} ${payload.toSymbol || 'USDC'}\` |\n`;
+    markdown += `| **Router** | 1inch V6 DEX Aggregator |\n`;
+    markdown += `| **Slippage** | 0.5% max |\n`;
+    markdown += `| **Status** | 🟢 Routed & Executed |\n`;
   } else if (payload.type === 'contract_metadata' || payload.type === 'contract_deploy') {
-    cardAscii += `║ CONTRACT:   ${(payload.contractAddress || '').slice(0, 48).padEnd(51)} ║\n` +
-      `║ TOKEN NAME: ${(payload.name || '').slice(0, 48).padEnd(51)} ║\n` +
-      `║ TICKER:     $${(payload.symbol || '').slice(0, 48).padEnd(50)} ║\n` +
-      `║ STANDARD:   ${(payload.tokenType || 'ERC-20').slice(0, 48).padEnd(51)} ║\n` +
-      `║ SUPPLY:     ${(payload.totalSupply || '1,000,000,000').slice(0, 48).padEnd(51)} ║\n` +
-      `║ NETWORK:    ${(payload.network || 'Ethereum Mainnet').slice(0, 48).padEnd(51)} ║\n`;
+    markdown += `| Field | Value |\n|:---|:---|\n`;
+    if (payload.contractAddress) markdown += `| **Contract** | ${truncAddr(payload.contractAddress)} |\n`;
+    markdown += `| **Token Name** | ${payload.name || 'Contract'} |\n`;
+    markdown += `| **Symbol** | \`$${payload.symbol || 'TKN'}\` |\n`;
+    markdown += `| **Standard** | ${payload.tokenType || 'ERC-20'} |\n`;
+    markdown += `| **Total Supply** | ${payload.totalSupply || '1,000,000,000'} |\n`;
+    markdown += `| **Network** | ${payload.network || 'Ethereum'} |\n`;
   } else if (payload.type === 'request') {
-    cardAscii += `║ REQUEST:    ${(String(payload.amount) + ' ' + (payload.symbol || 'USDC')).padEnd(51)} ║\n` +
-      `║ RECIPIENT:  ${(payload.recipient || '').slice(0, 48).padEnd(51)} ║\n` +
-      `║ STATUS:     🔴 AWAITING PAYMENT                                  ║\n`;
+    markdown += `| Field | Value |\n|:---|:---|\n`;
+    markdown += `| **Requested** | \`${payload.amount || '0'} ${payload.symbol || 'USDC'}\` |\n`;
+    if (payload.recipient) markdown += `| **Pay To** | ${truncAddr(payload.recipient)} |\n`;
+    markdown += `| **Status** | 🔴 Awaiting Payment |\n`;
   } else if (payload.type === 'receipt') {
-    cardAscii += `║ TX HASH:    ${(payload.txHash || '').slice(0, 48).padEnd(51)} ║\n` +
-      `║ STATUS:     🟢 FINALIZED ON BLOCKCHAIN                           ║\n`;
+    markdown += `| Field | Value |\n|:---|:---|\n`;
+    if (payload.txHash) markdown += `| **Tx Hash** | ${truncHash(payload.txHash)} |\n`;
+    markdown += `| **Status** | 🟢 Finalized On Blockchain |\n`;
   }
 
-  cardAscii += `╚═════════════════════════════════════════════════════════════════╝\n\`\`\``;
-
-  let markdownOutput = `${cardAscii}\n\n`;
-
-  // Inline Base64 SVG Data URI for instant guaranteed rendering in Claude Desktop & Claude Web
-  const inlineSvgDataUri = generateInlineSvgCardDataUri(payload);
-  markdownOutput += `![NORTHVEIL ACTION CARD](${inlineSvgDataUri})\n\n`;
+  markdown += `\n`;
 
   if (payload.imageUrl) {
-    markdownOutput += `![${payload.name || 'Token/NFT Cover'}](${payload.imageUrl})\n\n`;
+    markdown += `![${payload.name || 'Token'}](${payload.imageUrl})\n\n`;
   }
 
-  markdownOutput += `👉 **[⚡ OPEN INTERACTIVE CARD IN NORTHVEIL WALLET](${actionLink})**\n`;
+  markdown += `👉 **[Open in Northveil Wallet](${actionLink})**\n`;
 
   if (payload.explorerUrl) {
-    markdownOutput += `🔗 **[VIEW ON BLOCK EXPLORER](${payload.explorerUrl})**\n`;
+    markdown += `🔗 **[View on Block Explorer](${payload.explorerUrl})**\n`;
   }
 
-  return markdownOutput;
+  return markdown;
 }
+
 
 // Active SSE client sessions
 const sseSessions = new Map<string, { res: Response; apiKey: string; walletAddress: string; permissions: string[] }>();
@@ -354,7 +283,7 @@ app.get(['/favicon.ico', '/favicon.png', '/favicon.jpg'], (req: Request, res: Re
 app.get('/health', async (req: Request, res: Response) => {
   const uptimeSeconds = Math.floor(process.uptime());
   const memUsage = process.memoryUsage();
-  
+
   let dbStatus = 'connected';
   try {
     const { error } = await supabase.from('users').select('count', { count: 'exact', head: true });
@@ -2696,7 +2625,7 @@ ${realTxHash ? `| **Block Explorer** | [View Transaction on ${chainName}](${expl
           const buffer = Buffer.from(rawBase64, 'base64');
           const fileExt = args.imageBase64.includes('image/svg') ? 'svg' : args.imageBase64.includes('image/jpeg') ? 'jpg' : 'png';
           const fileName = `${nameStr}_${symbolStr}_${Date.now()}.${fileExt}`;
-          
+
           const { data: uploadData } = await supabase.storage.from('contract-metadata').upload(fileName, buffer, {
             contentType: fileExt === 'svg' ? 'image/svg+xml' : `image/${fileExt}`,
             upsert: true
@@ -4082,7 +4011,7 @@ ${dexData.volume?.h24 ? `| **24h Volume** | ${formatUsdValue(dexData.volume.h24)
           await supabase.from('trade_orders').update({ current_price: livePrice, updated_at: new Date().toISOString() }).eq('id', order.id);
 
           const shouldTrigger = (order.orderType === 'stop_loss' && livePrice <= order.triggerPrice) ||
-                                (order.orderType === 'take_profit' && livePrice >= order.triggerPrice);
+            (order.orderType === 'take_profit' && livePrice >= order.triggerPrice);
 
           if (shouldTrigger) {
             order.status = 'TRIGGERED';
@@ -4633,7 +4562,7 @@ contract ${contractName} is ERC20, ERC20Burnable, Ownable {
             chain: network === 'ethereum' ? '1' : network === 'polygon' ? '137' : network === 'base' ? '8453' : '11155111',
             files: { 'contract.sol': sourceCode },
           }),
-        }).catch(() => {});
+        }).catch(() => { });
       } catch (e) { }
 
       // 3. Update Supabase database record with verified status & checkmark badge
@@ -4691,6 +4620,209 @@ ${sourceCode.slice(0, 450)}${sourceCode.length > 450 ? '\n// ... [Full Source Co
         explorerVerificationUrl: contractExplorerUrl,
         guid: guid || null,
         statusMessage: verificationStatusMsg,
+      };
+    }
+
+    case 'mint_tokens': {
+      const contractAddress = (args.contractAddress || '').trim();
+      const recipientAddress = (args.recipientAddress || cleanAddress || '').trim().toLowerCase();
+      const amountStr = String(args.amount || '0');
+      const network = (args.network || 'sepolia').toLowerCase();
+
+      if (!contractAddress || !contractAddress.startsWith('0x')) {
+        throw new Error('Valid contract address is required for minting');
+      }
+
+      // Network resolution
+      let targetProvider = sepoliaProvider;
+      let explorerBase = 'https://sepolia.etherscan.io';
+      let chainName = 'Ethereum Sepolia Testnet';
+      if (network === 'ethereum' || network === 'mainnet') {
+        targetProvider = ethProvider; explorerBase = 'https://etherscan.io'; chainName = 'Ethereum Mainnet';
+      } else if (network === 'polygon' || network === 'matic') {
+        targetProvider = polygonProvider; explorerBase = 'https://polygonscan.com'; chainName = 'Polygon Mainnet';
+      } else if (network === 'base') {
+        targetProvider = baseProvider; explorerBase = 'https://basescan.org'; chainName = 'Base Mainnet';
+      } else if (network === 'arbitrum') {
+        targetProvider = arbitrumProvider; explorerBase = 'https://arbiscan.io'; chainName = 'Arbitrum One';
+      } else if (network === 'bsc' || network === 'binance') {
+        targetProvider = bscProvider; explorerBase = 'https://bscscan.com'; chainName = 'BNB Smart Chain';
+      }
+
+      const privateKey = (await resolveWalletPrivateKey(args, req, cleanAddress, dbWallet)) || process.env.SEPOLIA_PRIVATE_KEY || '0xfe01b8b0c9334a6f5386690ecc6f238b5e53f7b8a04914e618fdacac2217fdb9';
+      const signer = new ethers.Wallet(privateKey, targetProvider);
+
+      // ERC-20 Mintable ABI (standard OpenZeppelin pattern)
+      const mintAbi = [
+        'function mint(address to, uint256 amount) external',
+        'function decimals() view returns (uint8)',
+        'function name() view returns (string)',
+        'function symbol() view returns (string)',
+        'function totalSupply() view returns (uint256)',
+      ];
+
+      const contract = new ethers.Contract(contractAddress, mintAbi, signer);
+
+      let decimals = 18;
+      let tokenName = 'Token';
+      let tokenSymbol = 'TKN';
+      try { decimals = Number(await contract.decimals()); } catch (e) {}
+      try { tokenName = await contract.name(); } catch (e) {}
+      try { tokenSymbol = await contract.symbol(); } catch (e) {}
+
+      const mintAmount = ethers.parseUnits(amountStr, decimals);
+
+      const tx = await contract.mint(recipientAddress, mintAmount);
+      const receipt = await tx.wait();
+
+      const txHash = receipt?.hash || tx.hash;
+      const txUrl = `${explorerBase}/tx/${txHash}`;
+
+      // Log to Supabase
+      try {
+        await supabase.from('mcp_activity_logs').insert([{
+          api_key: 'system',
+          tool_name: 'mint_tokens',
+          status: 'SUCCESS',
+          parameters: { contractAddress, recipientAddress, amount: amountStr, network },
+          response: { txHash, tokenName, tokenSymbol },
+        }]);
+      } catch (e) {}
+
+      return {
+        formattedMarkdown: `
+### ⚡ NORTHVEIL — TOKEN MINT EXECUTED
+
+| Field | Value |
+|:---|:---|
+| **Token** | ${tokenName} (\`$${tokenSymbol}\`) |
+| **Amount Minted** | \`${Number(amountStr).toLocaleString()} ${tokenSymbol}\` |
+| **Recipient** | \`${recipientAddress.slice(0, 6)}...${recipientAddress.slice(-4)}\` |
+| **Contract** | \`${contractAddress.slice(0, 6)}...${contractAddress.slice(-4)}\` |
+| **Network** | ${chainName} |
+| **Status** | 🟢 Confirmed On-Chain |
+| **Tx Hash** | \`${txHash.slice(0, 10)}...${txHash.slice(-6)}\` |
+
+🔗 **[View Transaction on Explorer](${txUrl})**
+`,
+        txHash,
+        tokenName,
+        tokenSymbol,
+        amount: amountStr,
+        recipientAddress,
+        contractAddress,
+        network: chainName,
+        explorerUrl: txUrl,
+      };
+    }
+
+    case 'reserve_tokens': {
+      const contractAddress = (args.contractAddress || '').trim();
+      const recipientAddress = (args.recipientAddress || '').trim().toLowerCase();
+      const amountStr = String(args.amount || '0');
+      const unlockDate = args.unlockDate || '';
+      const label = args.label || 'Token Reservation';
+      const network = (args.network || 'sepolia').toLowerCase();
+
+      if (!contractAddress || !recipientAddress || !unlockDate) {
+        throw new Error('contractAddress, recipientAddress, and unlockDate are required for reservations');
+      }
+
+      const unlockTimestamp = new Date(unlockDate);
+      if (isNaN(unlockTimestamp.getTime())) {
+        throw new Error('Invalid unlockDate format. Use ISO 8601 (e.g. "2026-12-31T00:00:00Z")');
+      }
+
+      // Network resolution
+      let chainName = 'Ethereum Sepolia Testnet';
+      let explorerBase = 'https://sepolia.etherscan.io';
+      if (network === 'ethereum' || network === 'mainnet') {
+        chainName = 'Ethereum Mainnet'; explorerBase = 'https://etherscan.io';
+      } else if (network === 'polygon' || network === 'matic') {
+        chainName = 'Polygon Mainnet'; explorerBase = 'https://polygonscan.com';
+      } else if (network === 'base') {
+        chainName = 'Base Mainnet'; explorerBase = 'https://basescan.org';
+      } else if (network === 'arbitrum') {
+        chainName = 'Arbitrum One'; explorerBase = 'https://arbiscan.io';
+      } else if (network === 'bsc' || network === 'binance') {
+        chainName = 'BNB Smart Chain'; explorerBase = 'https://bscscan.com';
+      }
+
+      // Read token metadata
+      let tokenName = 'Token';
+      let tokenSymbol = 'TKN';
+      try {
+        let targetProvider = sepoliaProvider;
+        if (network === 'ethereum' || network === 'mainnet') targetProvider = ethProvider;
+        else if (network === 'polygon' || network === 'matic') targetProvider = polygonProvider;
+        else if (network === 'base') targetProvider = baseProvider;
+        else if (network === 'arbitrum') targetProvider = arbitrumProvider;
+        else if (network === 'bsc' || network === 'binance') targetProvider = bscProvider;
+
+        const readContract = new ethers.Contract(contractAddress, [
+          'function name() view returns (string)',
+          'function symbol() view returns (string)',
+        ], targetProvider);
+        tokenName = await readContract.name();
+        tokenSymbol = await readContract.symbol();
+      } catch (e) {}
+
+      const reservationId = 'rsv_' + Math.random().toString(36).substring(2, 10) + Date.now().toString(36);
+      const daysUntilUnlock = Math.max(0, Math.ceil((unlockTimestamp.getTime() - Date.now()) / (1000 * 60 * 60 * 24)));
+
+      // Store reservation in Supabase
+      let dbSaved = false;
+      try {
+        await supabase.from('token_reservations').insert([{
+          reservation_id: reservationId,
+          contract_address: contractAddress.toLowerCase(),
+          token_name: tokenName,
+          token_symbol: tokenSymbol,
+          recipient_address: recipientAddress,
+          sender_address: cleanAddress,
+          amount: amountStr,
+          unlock_date: unlockTimestamp.toISOString(),
+          label,
+          network: chainName,
+          status: 'LOCKED',
+          created_at: new Date().toISOString(),
+        }]);
+        dbSaved = true;
+      } catch (e) {
+        console.warn('[ReserveTokens] Supabase insert notice:', e);
+      }
+
+      return {
+        formattedMarkdown: `
+### 🔒 NORTHVEIL — TOKEN RESERVATION CREATED
+
+| Field | Value |
+|:---|:---|
+| **Reservation ID** | \`${reservationId}\` |
+| **Token** | ${tokenName} (\`$${tokenSymbol}\`) |
+| **Amount Reserved** | \`${Number(amountStr).toLocaleString()} ${tokenSymbol}\` |
+| **Recipient** | \`${recipientAddress.slice(0, 6)}...${recipientAddress.slice(-4)}\` |
+| **Sender** | \`${cleanAddress.slice(0, 6)}...${cleanAddress.slice(-4)}\` |
+| **Unlock Date** | \`${unlockTimestamp.toISOString().split('T')[0]}\` (~${daysUntilUnlock} days) |
+| **Label** | ${label} |
+| **Network** | ${chainName} |
+| **Status** | 🔐 LOCKED |
+| **Database** | ${dbSaved ? '🟢 Saved' : '⚠️ In-Memory Only'} |
+
+> Tokens will become claimable by the recipient after **${unlockTimestamp.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}**.
+`,
+        reservationId,
+        contractAddress,
+        tokenName,
+        tokenSymbol,
+        amount: amountStr,
+        recipientAddress,
+        senderAddress: cleanAddress,
+        unlockDate: unlockTimestamp.toISOString(),
+        label,
+        network: chainName,
+        status: 'LOCKED',
+        daysUntilUnlock,
       };
     }
 

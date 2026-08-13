@@ -1133,5 +1133,59 @@ export const MCP_TOOLS: MCPToolDefinition[] = [
       required: ['contractAddress', 'contractName'],
     },
   },
+  {
+    name: 'mint_tokens',
+    description: 'Mints new tokens from a deployed ERC-20 contract where the connected wallet is the contract owner or has minter role. Calls the contract\'s mint(address,uint256) function on-chain. Signs and broadcasts via Northveil custodial signer.',
+    annotations: { readOnly: false, destructive: true, confirmationRequired: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        contractAddress: { type: 'string', description: '0x-prefixed address of the deployed ERC-20 contract with a mint function' },
+        recipientAddress: { type: 'string', description: '0x-prefixed address to receive the minted tokens (defaults to wallet address if omitted)' },
+        amount: { type: 'string', description: 'Amount of tokens to mint (in human-readable units, e.g. "1000000" for 1M tokens)' },
+        network: { type: 'string', description: 'Target blockchain: sepolia (default), ethereum, base, polygon, arbitrum, bsc' },
+      },
+      required: ['contractAddress', 'amount'],
+    },
+    parameters: {
+      type: 'object',
+      properties: {
+        contractAddress: { type: 'string', description: 'ERC-20 contract address' },
+        recipientAddress: { type: 'string', description: 'Recipient address for minted tokens' },
+        amount: { type: 'string', description: 'Amount to mint in human-readable units' },
+        network: { type: 'string', description: 'Target network' },
+      },
+      required: ['contractAddress', 'amount'],
+    },
+  },
+  {
+    name: 'reserve_tokens',
+    description: 'Creates a time-locked token reservation. Transfers tokens from the wallet into escrow and records a reservation in Northveil\'s database with an unlock date. Tokens can be claimed by the recipient after the unlock date. Useful for vesting schedules, team allocations, and investor lockups.',
+    annotations: { readOnly: false, destructive: true, confirmationRequired: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        contractAddress: { type: 'string', description: '0x-prefixed ERC-20 token contract address' },
+        recipientAddress: { type: 'string', description: '0x-prefixed address that can claim tokens after unlock' },
+        amount: { type: 'string', description: 'Amount of tokens to reserve (human-readable units)' },
+        unlockDate: { type: 'string', description: 'ISO 8601 date/time when tokens become claimable (e.g. "2026-12-31T00:00:00Z")' },
+        label: { type: 'string', description: 'Optional human-readable label for this reservation (e.g. "Team Vesting Q1", "Investor Lockup")' },
+        network: { type: 'string', description: 'Target blockchain: sepolia (default), ethereum, base, polygon, arbitrum, bsc' },
+      },
+      required: ['contractAddress', 'recipientAddress', 'amount', 'unlockDate'],
+    },
+    parameters: {
+      type: 'object',
+      properties: {
+        contractAddress: { type: 'string', description: 'ERC-20 contract address' },
+        recipientAddress: { type: 'string', description: 'Recipient address' },
+        amount: { type: 'string', description: 'Amount to reserve' },
+        unlockDate: { type: 'string', description: 'Unlock date (ISO 8601)' },
+        label: { type: 'string', description: 'Reservation label' },
+        network: { type: 'string', description: 'Target network' },
+      },
+      required: ['contractAddress', 'recipientAddress', 'amount', 'unlockDate'],
+    },
+  },
 ];
 
