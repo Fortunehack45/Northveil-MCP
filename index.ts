@@ -281,27 +281,72 @@ app.get(['/favicon.ico', '/favicon.png', '/favicon.jpg'], (req: Request, res: Re
 
 // Real MCP Server Health & Telemetry Status Route
 app.get('/health', async (req: Request, res: Response) => {
+  const t0 = performance.now();
   const uptimeSeconds = Math.floor(process.uptime());
   const memUsage = process.memoryUsage();
 
+  // Test database connection
   let dbStatus = 'connected';
+  let dbLatency = 0;
+  const dbStart = performance.now();
   try {
     const { error } = await supabase.from('users').select('count', { count: 'exact', head: true });
+    dbLatency = Math.round(performance.now() - dbStart);
     if (error && error.code !== 'PGRST116') dbStatus = 'degraded';
   } catch (e) {
     dbStatus = 'offline';
   }
 
+  // Measure real RPC node connectivity and block numbers in parallel
+  const pingRpc = async (name: string, provider: ethers.JsonRpcProvider, chainId: number) => {
+    const start = performance.now();
+    try {
+      const blockNumber = await Promise.race([
+        provider.getBlockNumber(),
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), 2000))
+      ]);
+      return { chain: name, chainId, status: 'online', blockNumber, latencyMs: Math.round(performance.now() - start) };
+    } catch (err: any) {
+      return { chain: name, chainId, status: 'degraded', blockNumber: null, latencyMs: Math.round(performance.now() - start), error: err.message };
+    }
+  };
+
+  const [sepoliaCheck, ethCheck, baseCheck, polygonCheck, arbCheck, bscCheck] = await Promise.all([
+    pingRpc('Ethereum Sepolia', sepoliaProvider, 11155111),
+    pingRpc('Ethereum Mainnet', ethProvider, 1),
+    pingRpc('Base Mainnet', baseProvider, 8453),
+    pingRpc('Polygon Mainnet', polygonProvider, 137),
+    pingRpc('Arbitrum One', arbitrumProvider, 42161),
+    pingRpc('BNB Smart Chain', bscProvider, 56),
+  ]);
+
+  const totalTimeMs = Math.round(performance.now() - t0);
+
   res.json({
     status: 'ok',
     server: 'Northveil Universal MCP AI Engine',
+    version: '2.0.0',
     port: PORT,
     uptimeSeconds,
     memoryUsageMb: Math.round(memUsage.heapUsed / 1024 / 1024),
-    database: dbStatus,
-    timestamp: new Date().toISOString(),
+    database: {
+      status: dbStatus,
+      latencyMs: dbLatency
+    },
+    rpcNetworks: [
+      sepoliaCheck,
+      ethCheck,
+      baseCheck,
+      polygonCheck,
+      arbCheck,
+      bscCheck
+    ],
     supportedToolsCount: MCP_TOOLS.length,
+    openApiUrl: '/openapi.json',
+    restApiUrl: '/api/v1/tools',
     cors: 'enabled',
+    telemetryLatencyMs: totalTimeMs,
+    timestamp: new Date().toISOString(),
   });
 });
 
