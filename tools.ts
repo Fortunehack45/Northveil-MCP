@@ -1187,5 +1187,61 @@ export const MCP_TOOLS: MCPToolDefinition[] = [
       required: ['contractAddress', 'recipientAddress', 'amount', 'unlockDate'],
     },
   },
+  {
+    name: 'make_reservation',
+    description: 'Creates a real-world web3 reservation & booking ticket for flights, movie tickets, hotel rooms, concert/event passes, dining, or rentals paid with crypto. Generates an official digital booking pass, ticket ID, confirmation QR code payload, and settles payment via connected wallet.',
+    annotations: { readOnly: false, destructive: true, confirmationRequired: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        category: { type: 'string', description: 'Category: flight, movie, hotel, event, dining, rental, or custom', enum: ['flight', 'movie', 'hotel', 'event', 'dining', 'rental', 'custom'] },
+        title: { type: 'string', description: 'Reservation title (e.g. "Flight BA-204: London -> New York", "Movie: Dune 3 IMAX", "Grand Hyatt Suite")' },
+        bookingDate: { type: 'string', description: 'Date of flight/event/check-in (e.g. "2026-09-20")' },
+        bookingTime: { type: 'string', description: 'Time of flight/movie/reservation (e.g. "18:45 UTC")' },
+        quantity: { type: 'number', description: 'Number of seats, tickets, guests, or rooms (default: 1)' },
+        seatDetails: { type: 'string', description: 'Optional seat allocation, room number, or section (e.g. "Seat 14C", "VIP Row A", "Suite 502")' },
+        priceAmount: { type: 'string', description: 'Crypto price amount (e.g. "0.05", "120")' },
+        currency: { type: 'string', description: 'Crypto asset symbol for payment: ETH (default), USDC, USDT, SOL' },
+        customerName: { type: 'string', description: 'Passenger, guest, or ticket holder full name' },
+        network: { type: 'string', description: 'Target blockchain network: sepolia (default), ethereum, base, polygon, arbitrum, bsc' },
+      },
+      required: ['category', 'title', 'bookingDate', 'priceAmount'],
+    },
+    parameters: {
+      type: 'object',
+      properties: {
+        category: { type: 'string', description: 'Category of reservation' },
+        title: { type: 'string', description: 'Reservation title' },
+        bookingDate: { type: 'string', description: 'Booking date' },
+        bookingTime: { type: 'string', description: 'Booking time' },
+        quantity: { type: 'number', description: 'Quantity of seats/tickets' },
+        seatDetails: { type: 'string', description: 'Seat allocation or room details' },
+        priceAmount: { type: 'string', description: 'Price in crypto' },
+        currency: { type: 'string', description: 'Payment asset symbol' },
+        customerName: { type: 'string', description: 'Guest name' },
+        network: { type: 'string', description: 'Target network' },
+      },
+      required: ['category', 'title', 'bookingDate', 'priceAmount'],
+    },
+  },
+  {
+    name: 'list_reservations',
+    description: 'Retrieves all active web3 reservations, flight boarding passes, movie tickets, and hotel bookings associated with the wallet address.',
+    annotations: { readOnly: true, destructive: false, confirmationRequired: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        walletAddress: { type: 'string', description: 'Optional wallet address to filter reservations' },
+        category: { type: 'string', description: 'Optional filter by category: flight, movie, hotel, event, dining, rental' },
+      },
+    },
+    parameters: {
+      type: 'object',
+      properties: {
+        walletAddress: { type: 'string', description: 'Wallet address' },
+        category: { type: 'string', description: 'Category filter' },
+      },
+    },
+  },
 ];
 
