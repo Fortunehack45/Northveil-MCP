@@ -627,17 +627,46 @@ function checkToolPermission(toolName: string, permissions: string[]): { allowed
 function getOpenApiSpec(baseUrl: string) {
   const paths: Record<string, any> = {};
 
+  // Standard MCP JSON-RPC Endpoint
+  paths['/mcp'] = {
+    post: {
+      summary: 'Universal Northveil MCP & JSON-RPC 2.0 Endpoint',
+      description: 'Executes MCP tools via standard JSON-RPC 2.0 (initialize, tools/list, tools/call) or direct tool requests.',
+      operationId: 'mcpJsonRpcCall',
+      requestBody: {
+        required: true,
+        content: {
+          'application/json': {
+            schema: {
+              type: 'object',
+              properties: {
+                jsonrpc: { type: 'string', example: '2.0' },
+                method: { type: 'string', example: 'tools/call' },
+                params: { type: 'object' },
+                id: { type: 'string', example: '1' }
+              }
+            }
+          }
+        }
+      },
+      responses: {
+        '200': { description: 'Successful execution' }
+      }
+    }
+  };
+
   for (const tool of MCP_TOOLS) {
-    paths[`/api/v1/${tool.name}`] = {
+    const routeObj = {
       post: {
         summary: tool.description,
+        description: tool.description,
         operationId: tool.name,
         security: [{ ApiKeyAuth: [] }, { BearerAuth: [] }],
         requestBody: {
           required: false,
           content: {
             'application/json': {
-              schema: tool.parameters,
+              schema: tool.parameters || tool.inputSchema,
             },
           },
         },
@@ -653,17 +682,23 @@ function getOpenApiSpec(baseUrl: string) {
         },
       },
     };
+
+    paths[`/api/v1/${tool.name}`] = routeObj;
+    paths[`/api/v1/tools/${tool.name}`] = routeObj;
   }
 
   return {
-    openapi: '3.0.0',
+    openapi: '3.0.3',
     info: {
       title: 'Northveil AI Assistant Wallet API',
-      description: 'Allows AI models (Claude, ChatGPT, Cursor) to manage crypto wallets, deploy smart contracts, and execute trades on real blockchains.',
+      description: 'Allows AI models (Claude, ChatGPT, Cursor) to manage crypto wallets, deploy smart contracts, execute trades, and make web3 reservations on real blockchains.',
       version: '1.0.0',
       'x-logo': { url: 'https://iili.io/CgBPBHv.jpg' },
     },
-    servers: [{ url: baseUrl, description: 'Northveil MCP Server' }],
+    servers: [
+      { url: baseUrl, description: 'Active Northveil MCP Server' },
+      { url: 'https://northveil-mcp.vercel.app', description: 'Production Vercel Server' }
+    ],
     components: {
       securitySchemes: {
         ApiKeyAuth: {
@@ -881,28 +916,47 @@ app.all(['/keep-alive', '/api/keep-alive'], async (req: Request, res: Response) 
     lastPing: status,
   });
 });
-
-// Health Check Endpoint
-app.get('/health', async (req: Request, res: Response) => {
-  const dbCheck = await pingSupabase();
-  res.json({
-    status: 'ONLINE',
-    server: 'Northveil Universal AI Server v1.0',
-    protocols: ['MCP SSE', 'JSON-RPC 2.0', 'OpenAPI 3.0', 'Ethers Real RPC', 'Keep-Alive Engine'],
-    databaseConnected: dbCheck.success,
-    supabaseProject: 'ulkbchewsrksgvlbzjzl',
-    activeToolsCount: MCP_TOOLS.length,
-    activeSessions: sseSessions.size,
-    timestamp: new Date().toISOString(),
-  });
+// Global CORS Preflight Options for ChatGPT & REST Proxies
+app.options('*', (req: Request, res: Response) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+  return res.status(204).end();
 });
 
-// UNIVERSAL REST API ENDPOINTS
-app.post('/api/v1/:toolName', async (req: Request, res: Response) => {
+// OpenAPI Specification Endpoints for ChatGPT Actions
+app.get(['/openapi.json', '/api/v1/openapi.json'], (req: Request, res: Response) => {
+  const protocol = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+  const baseUrl = `${protocol}://${req.headers.host}`;
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.json(getOpenApiSpec(baseUrl));
+});
+
+app.get(['/openapi.yaml', '/api/v1/openapi.yaml'], (req: Request, res: Response) => {
+  const protocol = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+  const baseUrl = `${protocol}://${req.headers.host}`;
+  const spec = getOpenApiSpec(baseUrl);
+  res.setHeader('Content-Type', 'text/yaml');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.send(JSON.stringify(spec, null, 2));
+});
+
+// UNIVERSAL REST API ENDPOINTS FOR CHATGPT ACTIONS & REST CLIENTS
+app.all(['/api/v1/tools/:toolName', '/api/v1/:toolName'], async (req: Request, res: Response) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+
+  if (req.method === 'OPTIONS') {
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
+    return res.status(204).end();
+  }
+
   const toolName = req.params.toolName;
   const rawKey = (req.headers['x-api-key'] || req.headers['authorization'] || req.query.api_key || '').toString();
+  const walletAddr = (req.body?.walletAddress || req.headers['x-wallet-address'] || req.query?.wallet_address || '').toString();
 
-  const auth = await authenticateClient(rawKey, req.body?.walletAddress || req.query?.wallet_address as string);
+  const auth = await authenticateClient(rawKey, walletAddr);
 
   if (!auth.valid) {
     return res.status(401).json({ success: false, error: "HTTP 401 Unauthorized: Invalid, inactive, or missing Northveil API key ('X-API-Key' header required)." });
@@ -919,15 +973,20 @@ app.post('/api/v1/:toolName', async (req: Request, res: Response) => {
   }
 
   try {
-    const result = await executeRealTool(toolName, req.body || {}, auth.walletAddress, req);
+    const toolArgs = { ...req.query, ...(req.body || {}) };
+    const result = await executeRealTool(toolName, toolArgs, auth.walletAddress, req);
 
-    await supabase.from('mcp_activity_logs').insert([{
-      api_key: rawKey.replace('Bearer ', ''),
-      tool_name: toolName,
-      status: 'SUCCESS',
-      parameters: { ...req.body, walletAddress: auth.walletAddress },
-      response: result,
-    }]);
+    try {
+      await supabase.from('mcp_activity_logs').insert([{
+        api_key: rawKey.replace('Bearer ', ''),
+        tool_name: toolName,
+        status: 'SUCCESS',
+        parameters: { ...toolArgs, walletAddress: auth.walletAddress },
+        response: result,
+      }]);
+    } catch (e) {}
+
+    const formattedMarkdown = result?.formattedMarkdown || (typeof result === 'string' ? result : JSON.stringify(result, null, 2));
 
     return res.json({
       success: true,
@@ -935,9 +994,10 @@ app.post('/api/v1/:toolName', async (req: Request, res: Response) => {
       authenticatedWallet: auth.walletAddress,
       permissions: auth.permissions,
       result,
+      formattedMarkdown,
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, error: err.message });
+    return res.status(500).json({ success: false, tool: toolName, error: err.message || 'Execution error' });
   }
 });
 
@@ -975,10 +1035,21 @@ app.get('/sse', async (req: Request, res: Response) => {
 });
 
 app.post('/messages', async (req: Request, res: Response) => {
-  const sessionId = (req.query.sessionId as string) || '';
+  const sessionId = req.query.sessionId as string;
   const session = sseSessions.get(sessionId);
 
-  const { jsonrpc, method, params, id } = req.body || {};
+  let { jsonrpc, method, params, id, name, arguments: toolArgs } = req.body || {};
+
+  // Flexibly normalize request payload format for SSE messages
+  if (!method && name) {
+    method = 'tools/call';
+    params = { name, arguments: toolArgs || req.body };
+  } else if (method && method !== 'initialize' && method !== 'tools/list' && method !== 'tools/call') {
+    name = method;
+    toolArgs = params || req.body;
+    method = 'tools/call';
+    params = { name, arguments: toolArgs };
+  }
 
   if (!session) {
     return res.status(401).json({ jsonrpc: '2.0', error: { code: -32001, message: 'HTTP 401 Unauthorized: Active SSE session not found' }, id });
