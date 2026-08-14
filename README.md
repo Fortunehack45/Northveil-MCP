@@ -1,43 +1,29 @@
-# Northveil Model Context Protocol (MCP) Server
+# Northveil Universal Model Context Protocol (MCP) Server
 
 [![MCP Protocol](https://img.shields.io/badge/MCP-2024--11--05-blueviolet.svg?style=flat-square)](https://modelcontextprotocol.io/)
+[![Claude Desktop](https://img.shields.io/badge/Claude%20Desktop-Ready-orange.svg?style=flat-square)](https://claude.ai)
+[![Cursor IDE](https://img.shields.io/badge/Cursor%20IDE-Ready-purple.svg?style=flat-square)](https://cursor.sh)
+[![OpenAPI 3.0](https://img.shields.io/badge/OpenAPI-3.0.3-emerald.svg?style=flat-square)](https://swagger.io/specification/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-blue.svg?style=flat-square)](https://hub.docker.com/)
-[![Claude Desktop](https://img.shields.io/badge/Claude%20Desktop-Compatible-orange.svg?style=flat-square)](https://claude.ai)
-[![Cursor IDE](https://img.shields.io/badge/Cursor%20IDE-Compatible-purple.svg?style=flat-square)](https://cursor.sh)
 
-> **Enterprise Universal Model Context Protocol (MCP) Server exposing 38 autonomous Web3 tools, real-time airline flight search, luxury hotel booking, multi-chain custodial signing, and static AST smart contract audits to Claude Desktop, Cursor IDE, ChatGPT Actions, and autonomous AI agent frameworks.**
+An enterprise **Model Context Protocol (MCP)** server providing Claude Desktop, Cursor IDE, Windsurf, Continue.dev, ChatGPT Actions, and autonomous agent frameworks with 38 specialized tools for multi-chain Web3 interaction, cryptographic airline ticketing, luxury hotel reservations, and static smart contract security audits.
 
 ---
 
-## 📑 Table of Contents
+## ⚡ Transports Supported
 
-1. [Overview & Supported Transports](#-overview--supported-transports)
-2. [Claude Desktop Configuration](#-claude-desktop-configuration)
-3. [Cursor IDE Setup](#-cursor-ide-setup)
-4. [ChatGPT Actions & Custom GPTs OpenAPI 3.0 Schema](#-chatgpt-actions--custom-gpts)
-5. [LangChain, LlamaIndex & CrewAI Agent Integration](#-langchain-llamaindex--crewai-integration)
-6. [Docker Deployment & Production Hosting](#-docker-deployment)
-7. [MCP Tool Signatures & Parameter Schemas](#-mcp-tool-signatures)
-8. [Multi-Tenant Scoped Authentication](#-multi-tenant-scoped-authentication)
+1. **HTTP JSON-RPC 2.0 (`POST /mcp`)**: Standard JSON-RPC tool router for AI agents and client libraries.
+2. **Server-Sent Events (`GET /sse` & `POST /message`)**: Real-time bidirectional streaming for Claude Desktop.
+3. **OpenAPI 3.0.3 Schema (`GET /openapi.json` & `GET /mcp`)**: Direct one-click import into ChatGPT Actions.
+4. **Interactive Wallet UI Widget (`GET /ui/widget`)**: Visual portfolio widget embedded into agent webviews.
 
 ---
 
-## ⚡ Overview & Supported Transports
+## 🤖 1. Claude Desktop Setup
 
-The Northveil MCP Server supports all 3 official MCP transport protocols:
-
-1. **HTTP JSON-RPC 2.0 (`POST /mcp`)**: Universal endpoint compatible with remote AI agents, Web applications, and LangChain.
-2. **Server-Sent Events (`GET /sse` & `POST /message`)**: Real-time streaming transport for Claude Desktop and interactive IDEs.
-3. **OpenAPI 3.0.3 Specification (`GET /openapi.json` & `GET /mcp`)**: Direct one-click import into ChatGPT Actions and custom GPTs.
-
----
-
-## 🤖 Claude Desktop Configuration
-
-Add Northveil to your Claude Desktop configuration file:
-
-- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+Edit your Claude Desktop configuration file:
 - **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - **Linux**: `~/.config/Claude/claude_desktop_config.json`
 
 ```json
@@ -56,8 +42,7 @@ Add Northveil to your Claude Desktop configuration file:
 }
 ```
 
-Or connect directly to the hosted SSE stream:
-
+Or connect via Hosted SSE:
 ```json
 {
   "mcpServers": {
@@ -74,74 +59,79 @@ Or connect directly to the hosted SSE stream:
 
 ---
 
-## 💻 Cursor IDE Setup
+## 💻 2. Cursor IDE Configuration
 
-To enable Northveil AI tools across your codebase in Cursor:
-1. Open Cursor Settings ➔ **Features** ➔ **MCP Servers**.
+1. In Cursor, open **Settings** ➔ **Features** ➔ **MCP Servers**.
 2. Click **+ Add New MCP Server**.
-3. Fill in the fields:
-   - **Name**: `Northveil`
-   - **Type**: `command`
-   - **Command**: `npx -y northveil-cli mcp`
-4. Cursor Composer and Chat will immediately have access to all 38 tools!
+3. Set **Type** to `command` and enter:
+   ```bash
+   npx -y northveil-cli mcp
+   ```
+4. All 38 tools are now accessible to Cursor Composer and Agent mode!
 
 ---
 
-## 🌐 ChatGPT Actions & Custom GPTs
+## 🌐 3. ChatGPT Actions & Custom GPTs Setup
 
-Northveil automatically serves a compliant **OpenAPI 3.0.3 Schema**:
-
-1. In ChatGPT GPT Builder, go to **Configure** ➔ **Create new action**.
-2. Paste the Schema URL: `https://mcp.northveil.xyz/openapi.json` (or import directly from `https://mcp.northveil.xyz/mcp`).
-3. Set Authentication to **API Key** (Header: `X-API-Key`).
-4. ChatGPT can now natively query live crypto flight fares, check wallet balances, and audit smart contracts during conversation!
+1. In ChatGPT GPT Builder, go to **Configure** ➔ **Actions** ➔ **Create new action**.
+2. Paste Schema URL: `https://mcp.northveil.xyz/openapi.json`.
+3. Set Authentication: **API Key** (Header: `X-API-Key`).
+4. ChatGPT will automatically discover endpoints for searching flights in crypto, querying portfolios, and auditing smart contracts!
 
 ---
 
-## 🦜 LangChain, LlamaIndex & CrewAI Integration
+## 🦜 4. AI Agent Frameworks (LangChain & CrewAI)
 
-### Python LangChain Example
+### LangChain Python Agent
 ```python
-import os
-import requests
 from langchain.agents import initialize_agent, AgentType
 from langchain.tools import Tool
 from langchain_openai import ChatOpenAI
 import northveil
 
-client = northveil.Northveil(api_key=os.getenv("NORTHVEIL_API_KEY"))
+client = northveil.Northveil()
 
-def search_crypto_flights(query: str) -> str:
-    origin, dest = query.split(",")
-    res = client.search_flights(origin=origin.strip(), destination=dest.strip())
-    return res.get("formattedMarkdown", str(res))
+def search_crypto_flights(route: str):
+    orig, dest = route.split(",")
+    return client.search_flights(origin=orig.strip(), destination=dest.strip())
 
 tools = [
     Tool(
-        name="SearchFlights",
+        name="search_flights",
         func=search_crypto_flights,
-        description="Search real-time airline flights with live crypto pricing. Input: 'LHR, JFK'"
+        description="Search airline flights with live crypto pricing. Input format: 'LHR, JFK'"
     )
 ]
 
-llm = ChatOpenAI(model="gpt-4o", temperature=0)
-agent = initialize_agent(tools, llm, agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION, verbose=True)
-agent.run("Find me business class flights from London Heathrow to New York JFK in ETH")
+agent = initialize_agent(tools, ChatOpenAI(model="gpt-4o"), agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION, verbose=True)
+agent.run("Find business class flights from London Heathrow to New York JFK in ETH")
 ```
 
 ---
 
-## 🐳 Docker Deployment
-
-Run the complete Northveil MCP Server locally in an isolated container:
+## 🐳 5. Self-Hosting & Docker Deployment
 
 ```bash
-# Build container
-docker build -t northveil-mcp-server .
+# Clone and build container
+git clone https://github.com/Fortunehack45/Northveil-MCP.git
+cd Northveil-MCP
+docker build -t northveil-mcp .
 
-# Run with environment variables
-docker run -d -p 3001:3001   -e PORT=3001   -e SUPABASE_URL=https://ulkbchewsrksgvlbzjzl.supabase.co   -e SUPABASE_SERVICE_ROLE_KEY=your_key   --name northveil-mcp northveil-mcp-server
+# Run on port 3001
+docker run -d -p 3001:3001 \
+  -e PORT=3001 \
+  -e SUPABASE_URL=https://ulkbchewsrksgvlbzjzl.supabase.co \
+  -e SUPABASE_SERVICE_ROLE_KEY=your_key \
+  --name northveil-server northveil-mcp
 ```
+
+---
+
+## 🔒 Multi-Tenant Auth & Tool Permission Rules
+
+The server enforces strict multi-tenant authorization:
+- **Public Discovery Tools** (`search_flights`, `search_hotels`, `audit_smart_contract`, `get_realtime_prices`) require no wallet binding.
+- **Private Data Tools** (`get_portfolio`, `get_wallet_info`, `send_transfer`, `mint_tokens`) verify caller ownership against Supabase DB `mcp_api_keys`. If an unauthorized wallet is requested, the server responds with `403 Forbidden`.
 
 ---
 
