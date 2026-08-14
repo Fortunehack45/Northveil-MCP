@@ -1038,6 +1038,7 @@ app.all(['/api/v1/tools/:toolName', '/api/v1/:toolName'], async (req: Request, r
       tool: toolName,
       authenticatedWallet: auth.walletAddress,
       permissions: auth.permissions,
+      ...(typeof result === 'object' && result !== null ? result : {}),
       result,
       formattedMarkdown,
     });
@@ -1266,6 +1267,7 @@ app.post('/mcp', async (req: Request, res: Response) => {
             },
           ],
           authenticatedWallet: auth.walletAddress,
+          ...(typeof result === 'object' && result !== null ? result : {}),
         },
         id,
       });
@@ -2600,7 +2602,7 @@ ${holdings.map((h: any) => `| **${h.symbol}** | **${formatCryptoAmount(h.balance
       if (!isBroadcastedOnChain || !realTxHash) {
         return {
           formattedMarkdown: `
-### ❌ ON-CHAIN TRANSFER FAILED
+### [FAILED] ON-CHAIN TRANSFER ERROR
 
 > **Token**: **${amountStr} ${token}**  
 > **Sender Wallet**: \`${actualSignerAddress}\`  
@@ -2610,7 +2612,7 @@ ${holdings.map((h: any) => `| **${h.symbol}** | **${formatCryptoAmount(h.balance
 
 ---
 
-#### 💡 Troubleshooting Recommendations:
+#### Recommendations:
 1. Ensure sender wallet \`${actualSignerAddress}\` has sufficient native gas balance for network fees.
 2. Verify recipient address format and network RPC connectivity.
 `,
@@ -3427,10 +3429,10 @@ ${realTxHash ? `> **Transaction Hash**: [\`${realTxHash}\`](https://etherscan.io
       const status = criticals > 0 ? 'FAILED' : score >= 80 ? 'PASSED' : 'NEEDS_REVIEW';
 
       let reportMd = `
-### 🛡️ DYNAMIC AI SMART CONTRACT SECURITY AUDIT REPORT
+### NORTHVEIL — SMART CONTRACT SECURITY AUDIT REPORT
 
 > **Target**: \`${contractAddress || 'Inline Source Code'}\`  
-> **Security Score**: ${score >= 85 ? '🟢' : score >= 60 ? '🟡' : '🔴'} **${score}/100 (${status})**  
+> **Security Score**: **${score}/100 [${status}]**  
 > **Critical Risk**: **${criticals}** | **High Risk**: **${highs}** | **Medium Risk**: **${mediums}**
 
 | Severity | Vulnerability Title | Recommendation & Details |
@@ -3439,17 +3441,19 @@ ${realTxHash ? `> **Transaction Hash**: [\`${realTxHash}\`](https://etherscan.io
 
       if (findings.length > 0) {
         for (const f of findings) {
-          const badge = f.severity === 'CRITICAL' ? '🔴 CRITICAL' : f.severity === 'HIGH' ? '🟠 HIGH' : f.severity === 'MEDIUM' ? '🟡 MEDIUM' : '🔵 LOW';
+          const badge = f.severity === 'CRITICAL' ? '[CRITICAL]' : f.severity === 'HIGH' ? '[HIGH]' : f.severity === 'MEDIUM' ? '[MEDIUM]' : '[LOW]';
           reportMd += `| **${badge}** | **${f.title}** | ${f.detail} |\n`;
         }
       } else {
-        reportMd += `| 🟢 **PASS** | No Known Static Vulnerabilities | Code adheres to standard ERC/EIP security patterns. |\n`;
+        reportMd += `| [PASS] | No Known Static Vulnerabilities | Code adheres to standard ERC/EIP security patterns. |\n`;
       }
 
       return {
         formattedMarkdown: reportMd,
         securityScore: score,
+        score,
         status,
+        vulnerabilitiesFound: findings.length,
         findings,
         contractAddress,
       };
@@ -4809,7 +4813,7 @@ ${sourceCode.slice(0, 450)}${sourceCode.length > 450 ? '\n// ... [Full Source Co
 
       return {
         formattedMarkdown: `
-### ⚡ NORTHVEIL — TOKEN MINT EXECUTED
+### NORTHVEIL — TOKEN MINT EXECUTED
 
 | Field | Value |
 |:---|:---|
@@ -4818,10 +4822,10 @@ ${sourceCode.slice(0, 450)}${sourceCode.length > 450 ? '\n// ... [Full Source Co
 | **Recipient** | \`${recipientAddress.slice(0, 6)}...${recipientAddress.slice(-4)}\` |
 | **Contract** | \`${contractAddress.slice(0, 6)}...${contractAddress.slice(-4)}\` |
 | **Network** | ${chainName} |
-| **Status** | 🟢 Confirmed On-Chain |
+| **Status** | [CONFIRMED ON-CHAIN] |
 | **Tx Hash** | \`${txHash.slice(0, 10)}...${txHash.slice(-6)}\` |
 
-🔗 **[View Transaction on Explorer](${txUrl})**
+[VIEW ON BLOCK EXPLORER](${txUrl})
 `,
         txHash,
         tokenName,
@@ -4912,7 +4916,7 @@ ${sourceCode.slice(0, 450)}${sourceCode.length > 450 ? '\n// ... [Full Source Co
 
       return {
         formattedMarkdown: `
-### 🔒 NORTHVEIL — TOKEN RESERVATION CREATED
+### NORTHVEIL — TOKEN RESERVATION CREATED
 
 | Field | Value |
 |:---|:---|
@@ -4924,8 +4928,8 @@ ${sourceCode.slice(0, 450)}${sourceCode.length > 450 ? '\n// ... [Full Source Co
 | **Unlock Date** | \`${unlockTimestamp.toISOString().split('T')[0]}\` (~${daysUntilUnlock} days) |
 | **Label** | ${label} |
 | **Network** | ${chainName} |
-| **Status** | 🔐 LOCKED |
-| **Database** | ${dbSaved ? '🟢 Saved' : '⚠️ In-Memory Only'} |
+| **Status** | [LOCKED IN ESCROW] |
+| **Database** | ${dbSaved ? '[SYNCHRONIZED]' : '[IN-MEMORY ONLY]'} |
 
 > Tokens will become claimable by the recipient after **${unlockTimestamp.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}**.
 `,
@@ -4945,16 +4949,25 @@ ${sourceCode.slice(0, 450)}${sourceCode.length > 450 ? '\n// ... [Full Source Co
     }
 
     case 'make_reservation': {
-      const category = ((args.category || 'custom').toLowerCase() as 'flight' | 'movie' | 'hotel' | 'event' | 'dining' | 'rental' | 'custom');
-      const title = args.title || args.name || 'Web3 Reservation';
-      const bookingDate = args.bookingDate || args.date || new Date().toISOString().split('T')[0];
-      const bookingTime = args.bookingTime || args.time || '12:00 UTC';
-      const quantity = Number(args.quantity || 1);
-      const seatDetails = args.seatDetails || args.seat || args.room || 'Assigned at Check-in';
-      const priceAmount = String(args.priceAmount || args.price || '0.01');
-      const currency = (args.currency || 'ETH').toUpperCase();
-      const customerName = args.customerName || args.guestName || args.passengerName || 'Valued Guest';
-      const network = (args.network || 'sepolia').toLowerCase();
+      const allowedCategories = ['flight', 'movie', 'hotel', 'event', 'dining', 'rental', 'custom'] as const;
+      const rawCategory = (args.category || 'custom').toString().toLowerCase();
+      const category = (allowedCategories.includes(rawCategory as any) ? rawCategory : 'custom') as (typeof allowedCategories)[number];
+      
+      const title = String(args.title || args.name || 'Web3 Reservation').replace(/[<>]/g, '').trim();
+      const bookingDate = String(args.bookingDate || args.date || new Date().toISOString().split('T')[0]).trim();
+      const bookingTime = String(args.bookingTime || args.time || '12:00 UTC').trim();
+      
+      const parsedQty = parseInt(String(args.quantity || 1), 10);
+      const quantity = isNaN(parsedQty) || parsedQty < 1 ? 1 : Math.min(parsedQty, 1000);
+      
+      const seatDetails = String(args.seatDetails || args.seat || args.room || 'Assigned at Check-in').replace(/[<>]/g, '').trim();
+      
+      const rawPrice = String(args.priceAmount || args.price || '0.01').trim();
+      const priceAmount = isNaN(parseFloat(rawPrice)) || parseFloat(rawPrice) < 0 ? '0.00' : parseFloat(rawPrice).toFixed(6).replace(/0+$/, '').replace(/\.$/, '');
+      
+      const currency = String(args.currency || 'ETH').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+      const customerName = String(args.customerName || args.guestName || args.passengerName || 'Valued Guest').replace(/[<>]/g, '').trim();
+      const network = (args.network || 'sepolia').toString().toLowerCase();
 
       let chainName = 'Ethereum Sepolia Testnet';
       if (network === 'ethereum' || network === 'mainnet') chainName = 'Ethereum Mainnet';
@@ -4963,7 +4976,7 @@ ${sourceCode.slice(0, 450)}${sourceCode.length > 450 ? '\n// ... [Full Source Co
       else if (network === 'arbitrum') chainName = 'Arbitrum One';
       else if (network === 'bsc' || network === 'binance') chainName = 'BNB Smart Chain';
 
-      // Generate category-specific booking reference
+      // Generate category-specific cryptographic booking reference
       const prefixMap: Record<string, string> = {
         flight: 'FLT',
         movie: 'MOV',
@@ -5023,21 +5036,19 @@ ${sourceCode.slice(0, 450)}${sourceCode.length > 450 ? '\n// ... [Full Source Co
         console.warn('[MakeReservation] Supabase insert notice:', e);
       }
 
-      // Category-specific iconography and headers
-      let icon = '🎫';
       let typeHeader = 'WEB3 RESERVATION & TICKET PASS';
-      if (category === 'flight') { icon = '✈️'; typeHeader = 'FLIGHT BOARDING PASS'; }
-      else if (category === 'movie') { icon = '🎬'; typeHeader = 'MOVIE TICKET PASS'; }
-      else if (category === 'hotel') { icon = '🏨'; typeHeader = 'HOTEL BOOKING CONFIRMATION'; }
-      else if (category === 'event') { icon = '🎟️'; typeHeader = 'VIP EVENT TICKET PASS'; }
-      else if (category === 'dining') { icon = '🍽️'; typeHeader = 'DINING RESERVATION PASS'; }
-      else if (category === 'rental') { icon = '🚗'; typeHeader = 'RENTAL BOOKING CONFIRMATION'; }
+      if (category === 'flight') typeHeader = 'FLIGHT BOARDING PASS';
+      else if (category === 'movie') typeHeader = 'MOVIE TICKET PASS';
+      else if (category === 'hotel') typeHeader = 'HOTEL BOOKING CONFIRMATION';
+      else if (category === 'event') typeHeader = 'VIP EVENT TICKET PASS';
+      else if (category === 'dining') typeHeader = 'DINING RESERVATION PASS';
+      else if (category === 'rental') typeHeader = 'RENTAL BOOKING CONFIRMATION';
 
       const priceUsdApprox = (Number(priceAmount) * (currency === 'ETH' ? 3450 : currency === 'SOL' ? 148 : 1)).toFixed(2);
 
       return {
         formattedMarkdown: `
-### ${icon} NORTHVEIL — ${typeHeader}
+### NORTHVEIL — ${typeHeader}
 
 | Field | Details |
 |:---|:---|
@@ -5050,10 +5061,10 @@ ${sourceCode.slice(0, 450)}${sourceCode.length > 450 ? '\n// ... [Full Source Co
 | **Payment Settled** | **${priceAmount} ${currency}** (~$${priceUsdApprox} USD) |
 | **Settlement Network** | ${chainName} |
 | **Payer Wallet** | \`${cleanAddress.slice(0, 6)}...${cleanAddress.slice(-4)}\` |
-| **Status** | 🟢 CONFIRMED & GUARANTEED |
-| **Database Sync** | ${dbSaved ? '🟢 Saved to Supabase' : '⚡ Active In-Memory'} |
+| **Status** | [CONFIRMED & GUARANTEED] |
+| **Database Sync** | ${dbSaved ? '[SYNCHRONIZED WITH SUPABASE]' : '[ACTIVE IN-MEMORY]'} |
 
-> 🎫 **Digital Pass Active**: Present booking reference **\`${bookingReference}\`** or connect wallet **\`${cleanAddress.slice(0, 6)}...${cleanAddress.slice(-4)}\`** at check-in.
+> **Digital Pass Active**: Present booking reference **\`${bookingReference}\`** or authenticate wallet **\`${cleanAddress.slice(0, 6)}...${cleanAddress.slice(-4)}\`** at check-in.
 `,
         bookingReference,
         reservationId,
@@ -5094,7 +5105,7 @@ ${sourceCode.slice(0, 450)}${sourceCode.length > 450 ? '\n// ... [Full Source Co
       if (filtered.length === 0) {
         return {
           formattedMarkdown: `
-### 🎫 NORTHVEIL WEB3 RESERVATIONS
+### NORTHVEIL WEB3 RESERVATIONS
 
 > No active reservations found for wallet \`${filterAddress.slice(0, 6)}...${filterAddress.slice(-4)}\`.
 
@@ -5104,24 +5115,17 @@ Use \`make_reservation\` to book flight boarding passes, movie tickets, hotel ro
         };
       }
 
-      let markdown = `### 🎫 NORTHVEIL WEB3 RESERVATIONS & DIGITAL PASSES (${filtered.length})\n\n`;
+      let markdown = `### NORTHVEIL WEB3 RESERVATIONS & DIGITAL PASSES (${filtered.length})\n\n`;
       markdown += `| Reference | Category | Title | Date | Status |\n|:---|:---|:---|:---|:---|\n`;
 
       filtered.forEach((res: any) => {
         const ref = res.booking_reference || res.bookingReference || 'NV-RSV-0000';
-        const cat = res.category || 'custom';
+        const cat = (res.category || 'custom').toUpperCase();
         const tit = res.title || 'Reservation';
         const date = res.booking_date || res.bookingDate || 'TBD';
         const stat = res.status || 'CONFIRMED';
 
-        let catIcon = '🎫';
-        if (cat === 'flight') catIcon = '✈️';
-        else if (cat === 'movie') catIcon = '🎬';
-        else if (cat === 'hotel') catIcon = '🏨';
-        else if (cat === 'event') catIcon = '🎟️';
-        else if (cat === 'dining') catIcon = '🍽️';
-
-        markdown += `| \`${ref}\` | ${catIcon} ${cat.toUpperCase()} | **${tit}** | \`${date}\` | 🟢 ${stat} |\n`;
+        markdown += `| \`${ref}\` | [${cat}] | **${tit}** | \`${date}\` | [${stat}] |\n`;
       });
 
       return {
