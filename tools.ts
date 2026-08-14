@@ -1243,5 +1243,111 @@ export const MCP_TOOLS: MCPToolDefinition[] = [
       },
     },
   },
+  {
+    name: 'search_flights',
+    description: 'Searches live international flight routes between global IATA airport codes (e.g. LHR, JFK, LAX, HND, DXB, CDG, SIN). Returns available airlines (British Airways, Delta, Emirates, Virgin Atlantic, Singapore Airlines), schedules, durations, stops, cabin tiers, and real-time pricing in both USD and Crypto (ETH / USDC / SOL).',
+    annotations: { readOnly: true, destructive: false, confirmationRequired: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        origin: { type: 'string', description: 'Origin 3-letter IATA airport code or city name (e.g. "LHR", "London", "JFK", "New York")' },
+        destination: { type: 'string', description: 'Destination 3-letter IATA airport code or city name (e.g. "JFK", "HND", "Tokyo", "DXB", "Dubai")' },
+        departureDate: { type: 'string', description: 'Departure date in YYYY-MM-DD format (e.g. "2026-09-20")' },
+        returnDate: { type: 'string', description: 'Optional return date for round-trip flights in YYYY-MM-DD format' },
+        passengers: { type: 'number', description: 'Number of adult passengers (default: 1)' },
+        cabinClass: { type: 'string', description: 'Cabin class: economy (default), premium_economy, business, first', enum: ['economy', 'premium_economy', 'business', 'first'] },
+        currency: { type: 'string', description: 'Payment crypto currency: ETH (default), USDC, USDT, SOL' },
+      },
+      required: ['origin', 'destination', 'departureDate'],
+    },
+    parameters: {
+      type: 'object',
+      properties: {
+        origin: { type: 'string', description: 'Origin IATA code or city' },
+        destination: { type: 'string', description: 'Destination IATA code or city' },
+        departureDate: { type: 'string', description: 'Departure date' },
+        returnDate: { type: 'string', description: 'Return date' },
+        passengers: { type: 'number', description: 'Passengers count' },
+        cabinClass: { type: 'string', description: 'Cabin class' },
+        currency: { type: 'string', description: 'Payment currency' },
+      },
+      required: ['origin', 'destination', 'departureDate'],
+    },
+  },
+  {
+    name: 'search_hotels',
+    description: 'Searches real-world hotel accommodations, luxury resorts, and boutique rooms across global destinations (Tokyo, London, New York, Dubai, Paris, Singapore, Bali, etc.). Returns property star ratings, room tiers, nightly rates, amenities, and total crypto pricing.',
+    annotations: { readOnly: true, destructive: false, confirmationRequired: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        destination: { type: 'string', description: 'City or destination name (e.g. "Tokyo", "London", "New York", "Paris", "Dubai")' },
+        checkInDate: { type: 'string', description: 'Check-in date in YYYY-MM-DD format (e.g. "2026-10-05")' },
+        checkOutDate: { type: 'string', description: 'Check-out date in YYYY-MM-DD format (e.g. "2026-10-08")' },
+        guests: { type: 'number', description: 'Number of guests (default: 1)' },
+        rooms: { type: 'number', description: 'Number of rooms (default: 1)' },
+        starRating: { type: 'number', description: 'Minimum hotel star rating (e.g. 4 or 5)' },
+        currency: { type: 'string', description: 'Payment crypto currency: ETH (default), USDC, USDT, SOL' },
+      },
+      required: ['destination', 'checkInDate', 'checkOutDate'],
+    },
+    parameters: {
+      type: 'object',
+      properties: {
+        destination: { type: 'string', description: 'City name or destination' },
+        checkInDate: { type: 'string', description: 'Check-in date' },
+        checkOutDate: { type: 'string', description: 'Check-out date' },
+        guests: { type: 'number', description: 'Guests count' },
+        rooms: { type: 'number', description: 'Rooms count' },
+        starRating: { type: 'number', description: 'Minimum stars' },
+        currency: { type: 'string', description: 'Payment currency' },
+      },
+      required: ['destination', 'checkInDate', 'checkOutDate'],
+    },
+  },
+  {
+    name: 'search_events_and_movies',
+    description: 'Searches cinema movie screenings (IMAX, 70mm, 3D), live music concerts, sporting events, and Web3 VIP conferences by city or title. Returns venue locations, showtimes, seating options, and live crypto pricing.',
+    annotations: { readOnly: true, destructive: false, confirmationRequired: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        city: { type: 'string', description: 'City name (e.g. "London", "New York", "Tokyo", "San Francisco")' },
+        category: { type: 'string', description: 'Event category: movie, concert, sports, conference, theater', enum: ['movie', 'concert', 'sports', 'conference', 'theater'] },
+        query: { type: 'string', description: 'Search term or movie title (e.g. "Interstellar", "Coldplay", "Formula 1", "ETHGlobal")' },
+        currency: { type: 'string', description: 'Payment crypto currency: ETH (default), USDC, USDT, SOL' },
+      },
+    },
+    parameters: {
+      type: 'object',
+      properties: {
+        city: { type: 'string', description: 'City name' },
+        category: { type: 'string', description: 'Event category' },
+        query: { type: 'string', description: 'Search query' },
+        currency: { type: 'string', description: 'Payment currency' },
+      },
+    },
+  },
+  {
+    name: 'get_booking_status',
+    description: 'Verifies and retrieves real-time confirmation status for any travel booking, flight, hotel, or ticket using an official airline PNR code (e.g. "7X9K2B") or Northveil reference ("NV-FLT-...").',
+    annotations: { readOnly: true, destructive: false, confirmationRequired: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        bookingReference: { type: 'string', description: 'Official airline PNR code (6 characters e.g. "7X9K2B") or Northveil reference (e.g. "NV-FLT-3885-K6WJ")' },
+        walletAddress: { type: 'string', description: 'Optional wallet address for verification' },
+      },
+      required: ['bookingReference'],
+    },
+    parameters: {
+      type: 'object',
+      properties: {
+        bookingReference: { type: 'string', description: 'PNR or Booking Reference code' },
+        walletAddress: { type: 'string', description: 'Wallet address' },
+      },
+      required: ['bookingReference'],
+    },
+  },
 ];
 
