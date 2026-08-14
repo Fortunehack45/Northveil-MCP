@@ -5477,8 +5477,8 @@ Use \`search_flights\` or \`search_hotels\` to find live travel routes and book 
 }
 
 if (process.env.NODE_ENV !== 'test' && !process.env.VERCEL) {
-  app.listen(PORT, () => {
-    console.log(`⚡ Northveil UNIVERSAL AI Server listening on http://localhost:${PORT}`);
+  app.listen(Number(PORT), '0.0.0.0', () => {
+    console.log(`⚡ Northveil UNIVERSAL AI Server listening on http://0.0.0.0:${PORT}`);
     console.log(`🔌 HTTP JSON-RPC endpoint: http://localhost:${PORT}/mcp`);
     console.log(`📄 OpenAPI 3.0 Schema: http://localhost:${PORT}/openapi.json`);
     console.log(`📡 SSE Event Stream endpoint: http://localhost:${PORT}/sse`);
