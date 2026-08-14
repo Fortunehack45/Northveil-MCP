@@ -674,9 +674,11 @@ app.post('/api/v1/webhooks', async (req: Request, res: Response) => {
 });
 
 app.post('/api/v1/webhooks/test', async (req: Request, res: Response) => {
-  const { url, webhookId, eventType = 'tx.confirmed', secret = 'whsec_demo_secret' } = req.body || {};
+  const { url, webhookId, eventType = 'tx.confirmed', secret } = req.body || {};
   
-  const targetUrl = url || inMemoryWebhooks.find(w => w.id === webhookId)?.url;
+  const targetWebhook = inMemoryWebhooks.find(w => w.id === webhookId);
+  const targetUrl = url || targetWebhook?.url;
+  const webhookSecret = secret || targetWebhook?.secret || 'whsec_' + nodeCrypto.randomBytes(16).toString('hex');
   if (!targetUrl) {
     return res.status(400).json({ success: false, error: 'Target webhook URL or valid webhookId is required' });
   }
