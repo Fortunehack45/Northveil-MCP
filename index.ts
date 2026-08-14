@@ -777,24 +777,18 @@ export interface AuthResult {
   walletAddress: string;
   keyName: string;
   permissions: string[];
+  allowedWallets: string[];
+  tier: string;
+  userId: string;
 }
 
-// Authentication & Wallet Binding Handler (Universal Support for API Keys, OAuth Tokens, Wallet Addresses & AI Connectors)
+// Authentication & Wallet Binding Handler (Multi-Tenant Scoped Authorization Engine)
 async function authenticateClient(apiKey?: string, requestedAddress?: string): Promise<AuthResult> {
-  const DEFAULT_WALLET = '0x87678de86804c6c3612d66cbd6e2857f1a7d8345';
+  const DEFAULT_PUBLIC_WALLET = '0x87678de86804c6c3612d66cbd6e2857f1a7d8345';
 
-  // 1. If explicit valid wallet address is provided (0x...), authorize immediately!
-  if (requestedAddress && requestedAddress.toLowerCase().startsWith('0x') && requestedAddress.length === 42) {
-    return {
-      valid: true,
-      walletAddress: requestedAddress.toLowerCase(),
-      keyName: 'Wallet Address Auth',
-      permissions: ['*'],
-    };
-  }
-
-  // 2. If API Key or Bearer Token is provided, check Supabase DB or auto-register key
   const cleanKey = apiKey ? apiKey.trim().replace(/^Bearer\s+/i, '') : '';
+
+  // 1. If API Key or Bearer Token is provided, verify against Supabase DB
   if (cleanKey) {
     try {
       const { data } = await supabase
@@ -803,54 +797,115 @@ async function authenticateClient(apiKey?: string, requestedAddress?: string): P
         .eq('api_key', cleanKey)
         .maybeSingle();
 
-      if (data && data.wallet_address) {
+      if (data) {
+        if (data.is_active === false) {
+          return {
+            valid: false,
+            walletAddress: '',
+            keyName: data.key_name || 'Revoked Key',
+            permissions: [],
+            allowedWallets: [],
+            tier: 'revoked',
+            userId: data.user_id || 'unknown',
+          };
+        }
+
+        const boundAddress = (data.wallet_address || DEFAULT_PUBLIC_WALLET).toLowerCase();
+        const allowed = Array.isArray(data.allowed_wallets) && data.allowed_wallets.length > 0
+          ? data.allowed_wallets.map((w: string) => w.toLowerCase())
+          : [boundAddress];
+
         return {
           valid: true,
-          walletAddress: data.wallet_address.toLowerCase(),
-          keyName: data.key_name || 'API Client',
+          walletAddress: boundAddress,
+          keyName: data.key_name || 'Production Scoped Key',
           permissions: Array.isArray(data.permissions) && data.permissions.length > 0 ? data.permissions : ['*'],
+          allowedWallets: allowed,
+          tier: data.tier || 'developer',
+          userId: data.user_id || 'dev_user',
         };
       } else {
-        // Auto-register new API Key / OAuth Token in Supabase DB for tracking
+        // Auto-register newly generated developer key
+        const newBoundAddress = (requestedAddress && requestedAddress.toLowerCase().startsWith('0x') && requestedAddress.length === 42)
+          ? requestedAddress.toLowerCase()
+          : DEFAULT_PUBLIC_WALLET;
+
         await supabase.from('mcp_api_keys').upsert([{
           api_key: cleanKey,
-          key_name: 'Claude Desktop / AI Connector Key',
-          wallet_address: DEFAULT_WALLET,
+          key_name: 'Developer API Key',
+          wallet_address: newBoundAddress,
           permissions: ['*'],
           is_active: true,
+          tier: 'developer',
         }], { onConflict: 'api_key' }).then();
+
+        return {
+          valid: true,
+          walletAddress: newBoundAddress,
+          keyName: 'Developer API Key',
+          permissions: ['*'],
+          allowedWallets: [newBoundAddress],
+          tier: 'developer',
+          userId: 'dev_user',
+        };
       }
     } catch (e) {
-      console.warn('[Auth] Supabase key auto-registration note:', e);
+      console.warn('[Auth] Supabase key resolution note:', e);
     }
   }
 
-  // 3. Open Access Fallback for AI Connectors & Web Browsers: Always authorize!
+  // 2. If explicit valid wallet address is provided without API key
+  if (requestedAddress && requestedAddress.toLowerCase().startsWith('0x') && requestedAddress.length === 42) {
+    return {
+      valid: true,
+      walletAddress: requestedAddress.toLowerCase(),
+      keyName: 'Scoped Wallet Session',
+      permissions: ['*'],
+      allowedWallets: [requestedAddress.toLowerCase()],
+      tier: 'standard',
+      userId: 'wallet_user',
+    };
+  }
+
+  // 3. Public Guest Fallback for unauthenticated discovery tools
   return {
     valid: true,
-    walletAddress: DEFAULT_WALLET,
-    keyName: 'AI Connector Auth',
-    permissions: ['*'],
+    walletAddress: DEFAULT_PUBLIC_WALLET,
+    keyName: 'Public Discovery Guest',
+    permissions: ['read_public'],
+    allowedWallets: [DEFAULT_PUBLIC_WALLET],
+    tier: 'public_guest',
+    userId: 'guest',
   };
 }
 
-// Tool Permission Guard: Grants full execution rights to AI connectors and verified keys
+// Tool Permission Guard: Grants full execution rights to verified keys and public discovery tools
 function checkToolPermission(toolName: string, permissions: string[]): { allowed: boolean; requiredPermission: string } {
-  if (permissions.includes('*') || permissions.includes('all') || permissions.includes('admin') || permissions.length === 0) {
+  const publicDiscoveryTools = [
+    'search_flights', 'search_hotels', 'search_events_and_movies',
+    'audit_smart_contract', 'audit_token', 'get_realtime_prices',
+    'get_trending_memecoins', 'get_gas_estimate', 'verify_ticket_confirmation',
+    'verify_smart_contract'
+  ];
+
+  if (publicDiscoveryTools.includes(toolName)) {
+    return { allowed: true, requiredPermission: '' };
+  }
+
+  if (permissions.includes('*') || permissions.includes('all') || permissions.includes('admin') || permissions.includes('developer')) {
     return { allowed: true, requiredPermission: '' };
   }
 
   const readOnlyTools = [
     'get_wallet_info', 'get_portfolio', 'get_token_balance', 'get_transaction_history',
-    'get_gas_estimate', 'get_nft_gallery', 'get_realtime_prices', 'get_trending_memecoins',
-    'audit_token', 'get_active_orders', 'check_wallet_health', 'scan_wallet_security'
+    'get_active_orders', 'check_wallet_health', 'scan_wallet_security', 'list_reservations'
   ];
   const transferTools = [
-    'send_transfer', 'execute_swap', 'buy_tokens', 'sell_tokens', 'trade_tokens',
+    'send_transfer', 'execute_swap', 'execute_dex_swap', 'buy_tokens', 'sell_tokens', 'trade_tokens',
     'create_transaction_request', 'approve_transaction', 'reject_transaction',
     'set_trade_order', 'cancel_trade_order'
   ];
-  const contractTools = ['deploy_smart_contract', 'create_smart_contract', 'audit_smart_contract', 'upload_contract_asset'];
+  const contractTools = ['deploy_smart_contract', 'create_smart_contract', 'mint_tokens', 'reserve_tokens', 'upload_contract_asset'];
 
   if (readOnlyTools.includes(toolName)) {
     return { allowed: permissions.includes('read_only') || permissions.includes('read') || permissions.includes('*'), requiredPermission: 'read_only' };
@@ -862,8 +917,28 @@ function checkToolPermission(toolName: string, permissions: string[]): { allowed
     return { allowed: permissions.includes('contract_deploy_enabled') || permissions.includes('write') || permissions.includes('deploy') || permissions.includes('*'), requiredPermission: 'contract_deploy_enabled' };
   }
 
-  return { allowed: true, requiredPermission: '' };
+  return { allowed: false, requiredPermission: 'authentication_required' };
 }
+
+// ═════════════════════════════════════════════════════════════
+// AUTH PROFILE VERIFICATION ENDPOINT (/api/v1/auth/me)
+// ═════════════════════════════════════════════════════════════
+app.get(['/api/v1/auth/me', '/auth/me'], async (req: Request, res: Response) => {
+  const rawKey = (req.headers['x-api-key'] || req.headers['authorization'] || req.query.api_key || '').toString();
+  const explicitWallet = (req.query.wallet_address || req.query.wallet || req.headers['x-wallet-address'] || '').toString();
+  const auth = await authenticateClient(rawKey, explicitWallet);
+
+  return res.json({
+    authenticated: auth.valid && auth.tier !== 'public_guest',
+    keyName: auth.keyName,
+    walletAddress: auth.walletAddress,
+    allowedWallets: auth.allowedWallets,
+    permissions: auth.permissions,
+    tier: auth.tier,
+    userId: auth.userId,
+    timestamp: new Date().toISOString(),
+  });
+});
 
 // Generate OpenAPI 3.0 Specification for Claude Web & ChatGPT Actions
 function getOpenApiSpec(baseUrl: string) {
@@ -1778,9 +1853,27 @@ async function resolveWalletPrivateKey(
 
 const inMemoryBookingReservations: any[] = [];
 
-// REAL Tool Execution Engine with Ethers.js Real On-Chain RPC + Live Supabase DB
 async function executeRealTool(name: string, args: any, walletAddress: string, req?: Request) {
-  const cleanAddress = walletAddress.toLowerCase();
+  const cleanAddress = (walletAddress || '0x87678de86804c6c3612d66cbd6e2857f1a7d8345').toLowerCase();
+
+  // Strict Multi-Tenant Authorization & Scoped Wallet Isolation Guard
+  const SENSITIVE_TOOLS = [
+    'get_portfolio', 'get_wallet_info', 'get_transaction_history',
+    'get_active_orders', 'check_wallet_health', 'scan_wallet_security',
+    'create_wallet', 'send_transfer', 'execute_swap', 'execute_dex_swap',
+    'buy_tokens', 'sell_tokens', 'trade_tokens', 'set_trade_order',
+    'cancel_trade_order', 'deploy_smart_contract', 'create_smart_contract',
+    'mint_tokens', 'reserve_tokens', 'create_transaction_request',
+    'approve_transaction', 'reject_transaction', 'list_reservations'
+  ];
+
+  const requestedTarget = (args?.walletAddress || args?.address || '').toString().toLowerCase();
+  if (SENSITIVE_TOOLS.includes(name) && requestedTarget && requestedTarget.startsWith('0x') && requestedTarget.length === 42) {
+    if (requestedTarget !== cleanAddress) {
+      throw new Error(`🔒 403 Forbidden: Unauthorized access. Your API Key is scoped to wallet ${cleanAddress} and cannot access or manipulate private resources for ${requestedTarget}.`);
+    }
+  }
+
   const host = req?.headers.host || 'localhost:3001';
   const protocol = req?.headers['x-forwarded-proto'] || (req?.secure ? 'https' : 'http');
   const widgetBaseUrl = `${protocol}://${host}/ui/widget`;
