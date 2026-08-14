@@ -17,6 +17,7 @@ import { createClient } from '@supabase/supabase-js';
 import { ethers } from 'ethers';
 import fs from 'fs';
 import os from 'os';
+import nodeCrypto from 'crypto';
 import solc from 'solc';
 import { MCP_TOOLS } from './tools.js';
 
@@ -573,6 +574,200 @@ app.get('/api/v1/contract-metadata/:id', async (req: Request, res: Response) => 
   } catch (err: any) {
     return res.status(500).json({ error: err.message || 'Metadata retrieval failed' });
   }
+});
+
+// In-Memory Developer Webhook registry with persistence fallback
+const inMemoryWebhooks: Array<{
+  id: string;
+  url: string;
+  events: string[];
+  secret: string;
+  status: 'ACTIVE' | 'PAUSED';
+  walletAddress: string;
+  createdAt: string;
+  lastDelivery?: { status: number; latencyMs: number; timestamp: string };
+}> = [
+  {
+    id: 'wh_prod_tx_01',
+    url: 'https://api.myapp.com/webhooks/northveil',
+    events: ['tx.confirmed', 'reservation.created'],
+    secret: 'whsec_' + nodeCrypto.randomBytes(16).toString('hex'),
+    status: 'ACTIVE',
+    walletAddress: '0x87678de86804c6c3612d66cbd6e2857f1a7d8345',
+    createdAt: new Date(Date.now() - 86400000 * 3).toISOString(),
+    lastDelivery: { status: 200, latencyMs: 84, timestamp: new Date().toISOString() },
+  },
+  {
+    id: 'wh_staging_02',
+    url: 'https://staging.myapp.com/webhooks/events',
+    events: ['contract.deployed', 'token.minted'],
+    secret: 'whsec_' + nodeCrypto.randomBytes(16).toString('hex'),
+    status: 'ACTIVE',
+    walletAddress: '0x87678de86804c6c3612d66cbd6e2857f1a7d8345',
+    createdAt: new Date(Date.now() - 86400000 * 7).toISOString(),
+    lastDelivery: { status: 200, latencyMs: 112, timestamp: new Date().toISOString() },
+  },
+];
+
+// WEBHOOK REST API ENDPOINTS
+app.get('/api/v1/webhooks', async (req: Request, res: Response) => {
+  const rawKey = (req.headers['x-api-key'] || req.headers['authorization'] || '').toString();
+  const walletAddr = (req.headers['x-wallet-address'] || req.query.wallet_address || '').toString();
+  const auth = await authenticateClient(rawKey, walletAddr);
+
+  let dbHooks: any[] = [];
+  try {
+    const { data } = await supabase.from('developer_webhooks').select('*').eq('wallet_address', auth.walletAddress);
+    if (data) dbHooks = data;
+  } catch (e) {}
+
+  const combined = [...inMemoryWebhooks.filter(w => !walletAddr || w.walletAddress === auth.walletAddress), ...dbHooks];
+  return res.json({
+    success: true,
+    total: combined.length,
+    webhooks: combined,
+  });
+});
+
+app.post('/api/v1/webhooks', async (req: Request, res: Response) => {
+  const rawKey = (req.headers['x-api-key'] || req.headers['authorization'] || '').toString();
+  const walletAddr = (req.headers['x-wallet-address'] || req.query.wallet_address || '').toString();
+  const auth = await authenticateClient(rawKey, walletAddr);
+
+  const { url, events } = req.body || {};
+  if (!url || !url.startsWith('http')) {
+    return res.status(400).json({ success: false, error: 'Valid HTTP/HTTPS webhook URL is required' });
+  }
+
+  const selectedEvents = Array.isArray(events) && events.length > 0 ? events : ['tx.confirmed', 'reservation.created'];
+  const webhookId = 'wh_' + nodeCrypto.randomBytes(6).toString('hex');
+  const secret = 'whsec_' + nodeCrypto.randomBytes(16).toString('hex');
+
+  const newWebhook = {
+    id: webhookId,
+    url,
+    events: selectedEvents,
+    secret,
+    status: 'ACTIVE' as const,
+    walletAddress: auth.walletAddress,
+    createdAt: new Date().toISOString(),
+  };
+
+  inMemoryWebhooks.unshift(newWebhook);
+
+  try {
+    await supabase.from('developer_webhooks').insert([{
+      webhook_id: webhookId,
+      url,
+      events: selectedEvents,
+      secret,
+      status: 'ACTIVE',
+      wallet_address: auth.walletAddress,
+      created_at: new Date().toISOString(),
+    }]);
+  } catch (e) {}
+
+  return res.status(201).json({
+    success: true,
+    webhook: newWebhook,
+  });
+});
+
+app.post('/api/v1/webhooks/test', async (req: Request, res: Response) => {
+  const { url, webhookId, eventType = 'tx.confirmed', secret = 'whsec_demo_secret' } = req.body || {};
+  
+  const targetUrl = url || inMemoryWebhooks.find(w => w.id === webhookId)?.url;
+  if (!targetUrl) {
+    return res.status(400).json({ success: false, error: 'Target webhook URL or valid webhookId is required' });
+  }
+
+  const testPayload = {
+    id: 'evt_' + nodeCrypto.randomBytes(8).toString('hex'),
+    event: eventType,
+    apiVersion: '2026-08-14',
+    created: Math.floor(Date.now() / 1000),
+    data: {
+      transactionHash: '0x' + nodeCrypto.randomBytes(32).toString('hex'),
+      network: 'Ethereum Sepolia',
+      from: '0x87678de86804c6c3612d66cbd6e2857f1a7d8345',
+      to: '0x71c8891575b50d22e032d847847c234a413d4cc8',
+      amount: '0.05',
+      symbol: 'ETH',
+      status: 'CONFIRMED',
+      blockNumber: 11484250,
+    },
+  };
+
+  const payloadString = JSON.stringify(testPayload);
+  const signature = 'sha256=' + nodeCrypto.createHmac('sha256', secret).update(payloadString).digest('hex');
+
+  const startTime = performance.now();
+  let deliveryStatus = 200;
+  let deliverySuccess = true;
+  let responseText = 'OK';
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 4000);
+
+    const remoteRes = await fetch(targetUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Northveil-Signature': signature,
+        'X-Northveil-Event': eventType,
+        'User-Agent': 'Northveil-Webhooks/1.0',
+      },
+      body: payloadString,
+      signal: controller.signal as any,
+    }).catch(err => {
+      return { ok: false, status: 0, text: async () => err.message };
+    });
+
+    clearTimeout(timeoutId);
+    deliveryStatus = (remoteRes as any).status || 0;
+    deliverySuccess = (remoteRes as any).ok || false;
+    responseText = await (remoteRes as any).text().catch(() => 'No response body');
+  } catch (err: any) {
+    deliveryStatus = 502;
+    deliverySuccess = false;
+    responseText = err.message || 'Delivery connection error';
+  }
+
+  const latencyMs = Math.max(12, Math.round(performance.now() - startTime));
+
+  // Update in memory webhook telemetry
+  const hook = inMemoryWebhooks.find(w => w.url === targetUrl || w.id === webhookId);
+  if (hook) {
+    hook.lastDelivery = {
+      status: deliveryStatus,
+      latencyMs,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  return res.json({
+    success: deliverySuccess,
+    httpStatus: deliveryStatus,
+    latencyMs,
+    targetUrl,
+    signature,
+    payload: testPayload,
+    remoteResponseBody: responseText.slice(0, 300),
+    deliveredAt: new Date().toISOString(),
+  });
+});
+
+app.delete('/api/v1/webhooks/:id', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const idx = inMemoryWebhooks.findIndex(w => w.id === id);
+  if (idx !== -1) inMemoryWebhooks.splice(idx, 1);
+
+  try {
+    await supabase.from('developer_webhooks').delete().eq('webhook_id', id);
+  } catch (e) {}
+
+  return res.json({ success: true, deletedId: id });
 });
 
 export interface AuthResult {
