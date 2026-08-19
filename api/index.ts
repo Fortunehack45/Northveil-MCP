@@ -260,6 +260,7 @@ app.use((req, res, next) => {
 });
 
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // Phase 0 Fix 4: Express Rate Limiter (100 requests per 15 minutes per IP)
 const apiRateLimiter = rateLimit({
@@ -1568,6 +1569,21 @@ const handleToken = async (req: Request, res: Response) => {
 
     if (!authPayload) {
       return res.status(400).json({ error: 'invalid_grant', error_description: 'Invalid, used, or expired authorization code.' });
+    }
+
+    // PKCE S256 Verification: Verify code_verifier matches code_challenge from authorization
+    if (authPayload.codeChallenge && authPayload.codeChallengeMethod === 'S256') {
+      if (!codeVerifier) {
+        return res.status(400).json({ error: 'invalid_request', error_description: 'PKCE code_verifier is required.' });
+      }
+      const computedChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
+      if (computedChallenge !== authPayload.codeChallenge) {
+        return res.status(400).json({ error: 'invalid_grant', error_description: 'PKCE code_verifier does not match code_challenge.' });
+      }
+    } else if (authPayload.codeChallenge && authPayload.codeChallengeMethod === 'plain') {
+      if (codeVerifier !== authPayload.codeChallenge) {
+        return res.status(400).json({ error: 'invalid_grant', error_description: 'PKCE code_verifier does not match code_challenge.' });
+      }
     }
 
     // Invalidate from memory cache
