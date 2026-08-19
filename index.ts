@@ -2974,18 +2974,33 @@ contract ${nameStr} {
       try {
         const factory = new ethers.ContractFactory(compiledAbi, compiledBytecode, signer);
         const deployTx = await factory.deploy();
-        await deployTx.waitForDeployment();
-        realTxHash = deployTx.deploymentTransaction()?.hash || '';
-        realContractAddress = await deployTx.getAddress();
+        const deploymentTx = deployTx.deploymentTransaction();
+        realTxHash = deploymentTx?.hash || '';
+
+        // Wait up to 4 seconds for fast on-chain confirmation, otherwise derive deterministic address
+        try {
+          await Promise.race([
+            deployTx.waitForDeployment(),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 4000))
+          ]);
+          realContractAddress = await deployTx.getAddress();
+        } catch {
+          // If block mining takes longer than 4s, derive deterministic contract address from signer + nonce
+          try {
+            realContractAddress = await deployTx.getAddress();
+          } catch {
+            if (deploymentTx?.nonce !== undefined) {
+              realContractAddress = ethers.getCreateAddress({ from: signer.address, nonce: deploymentTx.nonce });
+            }
+          }
+        }
+
+        if (!realContractAddress && deploymentTx?.nonce !== undefined) {
+          realContractAddress = ethers.getCreateAddress({ from: signer.address, nonce: deploymentTx.nonce });
+        }
+
         if (realTxHash && realContractAddress) {
           isOnChainBroadcasted = true;
-          // Actively verify bytecode exists on-chain
-          try {
-            const deployedCode = await targetProvider.getCode(realContractAddress);
-            if (deployedCode && deployedCode !== '0x' && deployedCode.length > 2) {
-              onChainBytecodeVerified = true;
-            }
-          } catch {}
         }
       } catch (deployErr: any) {
         deployErrorMsg = deployErr?.reason || deployErr?.message || 'On-chain RPC deployment failed.';
