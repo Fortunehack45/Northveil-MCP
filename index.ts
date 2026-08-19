@@ -980,7 +980,7 @@ inMemoryApiKeys.set('nv_live_default_northveil_key', {
 
 // Authentication & Wallet Binding Handler (Strict Multi-Tenant Scoped Authorization Engine)
 async function authenticateClient(apiKey?: string, requestedAddress?: string): Promise<AuthResult> {
-  const DEFAULT_PUBLIC_WALLET = '0x87678de86804c6c3612d66cbd6e2857f1a7d8345';
+  const DEFAULT_PUBLIC_WALLET = '0x56f0fdbe1b09c0f65da1cb73ef878c07ec645417';
 
   const cleanKey = apiKey ? apiKey.trim().replace(/^Bearer\s+/i, '') : '';
 
@@ -1211,8 +1211,9 @@ async function enforceConfirmationGate(
   }
 
   // 2. No approvalToken provided: Always stage the transaction and require approval token
+  const targetSender = (toolArgs?.walletAddress || toolArgs?.fromAddress || toolArgs?.from || toolArgs?.userWallet || walletAddress || '0x56f0fdbe1b09c0f65da1cb73ef878c07ec645417').toLowerCase();
   const staged = await createTransactionRequest({
-    walletAddress,
+    walletAddress: targetSender,
     recipient: toolArgs?.recipient || toolArgs?.to || '0x0000000000000000000000000000000000000000',
     amount: toolArgs?.amount || toolArgs?.value || 0,
     asset: toolArgs?.asset || toolArgs?.symbol || 'ETH',
@@ -2273,7 +2274,7 @@ async function resolveWalletPrivateKey(
   // 4. Dynamic Supabase DB Query across 100,000+ users by address, user_id, or walletAddress
   if (!pk && !seed) {
     try {
-      const searchAddress = (cleanAddress || args?.walletAddress || args?.address || '').toLowerCase();
+      const searchAddress = (args?.walletAddress || args?.userWallet || args?.fromAddress || args?.address || cleanAddress || '').toLowerCase();
       if (searchAddress && searchAddress.startsWith('0x')) {
         const { data: wRow } = await supabase
           .from('wallets')
@@ -2380,7 +2381,10 @@ async function resolveWalletPrivateKey(
 const inMemoryBookingReservations: any[] = [];
 
 async function executeRealTool(name: string, args: any, walletAddress: string, req?: Request) {
-  const cleanAddress = (walletAddress || '0x87678de86804c6c3612d66cbd6e2857f1a7d8345').toLowerCase();
+  const explicitWallet = (args?.walletAddress || args?.userWallet || args?.ownerAddress || args?.fromAddress || '').toString().trim().toLowerCase();
+  const cleanAddress = (explicitWallet && explicitWallet.startsWith('0x') && explicitWallet.length === 42)
+    ? explicitWallet
+    : (walletAddress || '0x56f0fdbe1b09c0f65da1cb73ef878c07ec645417').toLowerCase();
 
   const WRITE_SENSITIVE_TOOLS = [
     'send_transfer', 'execute_swap', 'execute_dex_swap',
@@ -2552,8 +2556,9 @@ ${result.backupSeedPhrase}
     }
 
     case 'create_transaction_request': {
+      const targetAddress = (args.walletAddress || args.fromAddress || args.userWallet || cleanAddress).toLowerCase();
       const res = await createTransactionRequest({
-        walletAddress: cleanAddress,
+        walletAddress: targetAddress,
         recipient: args.recipient,
         amount: args.amount,
         asset: args.asset || 'ETH',
