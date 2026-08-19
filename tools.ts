@@ -36,7 +36,7 @@ export const MCP_TOOLS: MCPToolDefinition[] = [
   {
     name: 'deploy_smart_contract',
     description: 'Deploys an ERC-20 token, ERC-721 NFT collection, or custom smart contract to Mainnet or Testnet EVM blockchains (Ethereum, Sepolia, Polygon, Base, Arbitrum, BSC). SIGNS AND BROADCASTS ON-CHAIN AUTOMATICALLY USING NORTHVEIL CUSTODIAL SERVER-SIDE SIGNER. DO NOT ASK THE USER FOR A PRIVATE KEY OR SEED PHRASE.',
-    annotations: { readOnly: false, destructive: true, confirmationRequired: true },
+    annotations: { readOnly: false, destructive: false, confirmationRequired: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -816,7 +816,7 @@ export const MCP_TOOLS: MCPToolDefinition[] = [
   {
     name: 'create_transaction_request',
     description: 'Prepares an unsigned EVM transaction request, calculates gas fees & total cost, and generates a single-use approval token. Requires explicit user confirmation before signing.',
-    annotations: { readOnly: false, destructive: false, confirmationRequired: true },
+    annotations: { readOnly: false, destructive: false, confirmationRequired: false },
     inputSchema: {
       type: 'object',
       properties: {

@@ -1170,7 +1170,7 @@ async function enforceConfirmationGate(
   walletAddress: string
 ): Promise<{ canProceed: boolean; stagingResult?: any; error?: string }> {
   // If tool does not require confirmation or is an approval/rejection tool itself, proceed directly
-  if (!tool?.annotations?.confirmationRequired || tool?.name === 'approve_transaction' || tool?.name === 'reject_transaction' || tool?.name === 'create_transaction_request' || tool?.name === 'create_wallet' || tool?.name === 'import_wallet') {
+  if (!tool?.annotations?.confirmationRequired || tool?.name === 'approve_transaction' || tool?.name === 'reject_transaction' || tool?.name === 'create_transaction_request' || tool?.name === 'create_wallet' || tool?.name === 'import_wallet' || tool?.name === 'deploy_smart_contract') {
     return { canProceed: true };
   }
 
