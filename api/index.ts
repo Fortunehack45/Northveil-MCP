@@ -1170,7 +1170,7 @@ async function enforceConfirmationGate(
   walletAddress: string
 ): Promise<{ canProceed: boolean; stagingResult?: any; error?: string }> {
   // If tool does not require confirmation or is an approval/rejection tool itself, proceed directly
-  if (!tool?.annotations?.confirmationRequired || tool?.name === 'approve_transaction' || tool?.name === 'reject_transaction' || tool?.name === 'create_transaction_request') {
+  if (!tool?.annotations?.confirmationRequired || tool?.name === 'approve_transaction' || tool?.name === 'reject_transaction' || tool?.name === 'create_transaction_request' || tool?.name === 'create_wallet' || tool?.name === 'import_wallet') {
     return { canProceed: true };
   }
 
@@ -2383,7 +2383,7 @@ async function executeRealTool(name: string, args: any, walletAddress: string, r
   const cleanAddress = (walletAddress || '0x87678de86804c6c3612d66cbd6e2857f1a7d8345').toLowerCase();
 
   const WRITE_SENSITIVE_TOOLS = [
-    'create_wallet', 'send_transfer', 'execute_swap', 'execute_dex_swap',
+    'send_transfer', 'execute_swap', 'execute_dex_swap',
     'buy_tokens', 'sell_tokens', 'trade_tokens', 'set_trade_order',
     'cancel_trade_order', 'mint_tokens', 'reserve_tokens',
     'approve_transaction', 'reject_transaction'

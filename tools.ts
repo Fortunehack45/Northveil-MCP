@@ -526,7 +526,7 @@ export const MCP_TOOLS: MCPToolDefinition[] = [
   {
     name: 'create_wallet',
     description: 'Generates a new Ethereum wallet with a real private key and BIP-39 seed phrase. The wallet is stored in the Northveil database and ready for on-chain transactions. Returns the wallet address, private key, and seed phrase. The user MUST back up the seed phrase.',
-    annotations: { readOnly: false, destructive: false, confirmationRequired: true },
+    annotations: { readOnly: false, destructive: false, confirmationRequired: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -557,7 +557,7 @@ export const MCP_TOOLS: MCPToolDefinition[] = [
   {
     name: 'import_wallet',
     description: 'Imports an existing Ethereum wallet using a private key or BIP-39 seed phrase. The wallet is stored in the Northveil database for future on-chain transactions (transfers, deployments, swaps).',
-    annotations: { readOnly: false, destructive: false, confirmationRequired: true },
+    annotations: { readOnly: false, destructive: false, confirmationRequired: false },
     inputSchema: {
       type: 'object',
       properties: {
