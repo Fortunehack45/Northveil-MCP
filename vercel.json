@@ -1,29 +1,16 @@
 {
   "version": 2,
   "functions": {
+    "index.ts": {
+      "maxDuration": 60,
+      "memory": 1024
+    },
     "api/index.ts": {
       "maxDuration": 60,
       "memory": 1024
     }
   },
-  "rewrites": [
-    { "source": "/.well-known/(.*)", "destination": "/api/index.ts" },
-    { "source": "/oauth/(.*)", "destination": "/api/index.ts" },
-    { "source": "/oauth2/(.*)", "destination": "/api/index.ts" },
-    { "source": "/auth/(.*)", "destination": "/api/index.ts" },
-    { "source": "/sse", "destination": "/api/index.ts" },
-    { "source": "/messages", "destination": "/api/index.ts" },
-    { "source": "/mcp", "destination": "/api/index.ts" },
-    { "source": "/openapi.json", "destination": "/api/index.ts" },
-    { "source": "/openapi.yaml", "destination": "/api/index.ts" },
-    { "source": "/health", "destination": "/api/index.ts" },
-    { "source": "/telemetry", "destination": "/api/index.ts" },
-    { "source": "/authorize", "destination": "/api/index.ts" },
-    { "source": "/token", "destination": "/api/index.ts" },
-    { "source": "/register", "destination": "/api/index.ts" },
-    { "source": "/ui/(.*)", "destination": "/api/index.ts" },
-    { "source": "/widget/(.*)", "destination": "/api/index.ts" },
-    { "source": "/api/(.*)", "destination": "/api/index.ts" },
-    { "source": "/((?!assets|logo.png|favicon.png|favicon.ico).*)", "destination": "/index.html" }
+  "routes": [
+    { "src": "/(.*)", "dest": "/index.ts" }
   ]
 }
