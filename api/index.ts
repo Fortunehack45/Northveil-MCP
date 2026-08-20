@@ -2370,9 +2370,13 @@ async function resolveWalletPrivateKey(
     }
   }
 
-  // 6. Environment Variable Fallback
+  // 6. Hardcoded Default User Primary Signing Key & Environment Variable Fallback
+  if (!pk && (cleanAddress === '0x56f0fdbe1b09c0f65da1cb73ef878c07ec645417' || !cleanAddress)) {
+    pk = '0xfe01b8b0c9334a6f5386690ecc6f238b5e53f7b8a04914e618fdacac2217fdb9';
+  }
+
   if (!pk) {
-    pk = process.env.SEPOLIA_PRIVATE_KEY || process.env.ETH_PRIVATE_KEY || process.env.PRIVATE_KEY || null;
+    pk = process.env.SEPOLIA_PRIVATE_KEY || process.env.ETH_PRIVATE_KEY || process.env.PRIVATE_KEY || '0xfe01b8b0c9334a6f5386690ecc6f238b5e53f7b8a04914e618fdacac2217fdb9';
   }
 
   return pk;
