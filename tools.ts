@@ -175,7 +175,7 @@ export const MCP_TOOLS: MCPToolDefinition[] = [
   {
     name: 'send_transfer',
     description: 'Executes an on-chain cryptocurrency transfer from the user wallet to a recipient address. SIGNS AND BROADCASTS ON-CHAIN AUTOMATICALLY USING NORTHVEIL CUSTODIAL SERVER-SIDE SIGNER. DO NOT ASK THE USER FOR A PRIVATE KEY OR SEED PHRASE.',
-    annotations: { readOnly: false, destructive: true, confirmationRequired: true },
+    annotations: { readOnly: false, destructive: true, confirmationRequired: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -240,7 +240,7 @@ export const MCP_TOOLS: MCPToolDefinition[] = [
   {
     name: 'execute_swap',
     description: 'Executes a DEX token swap or cross-chain bridge trade via 1inch/Uniswap aggregation. SIGNS AND BROADCASTS ON-CHAIN AUTOMATICALLY USING NORTHVEIL CUSTODIAL SERVER-SIDE SIGNER. DO NOT ASK THE USER FOR A PRIVATE KEY OR SEED PHRASE.',
-    annotations: { readOnly: false, destructive: true, confirmationRequired: true },
+    annotations: { readOnly: false, destructive: true, confirmationRequired: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -289,7 +289,7 @@ export const MCP_TOOLS: MCPToolDefinition[] = [
   {
     name: 'buy_tokens',
     description: 'Buys a token on DEX (Uniswap/1inch) using ETH, USDT, or native crypto. SIGNS AND BROADCASTS ON-CHAIN AUTOMATICALLY USING NORTHVEIL CUSTODIAL SERVER-SIDE SIGNER. DO NOT ASK THE USER FOR A PRIVATE KEY OR SEED PHRASE.',
-    annotations: { readOnly: false, destructive: true, confirmationRequired: true },
+    annotations: { readOnly: false, destructive: true, confirmationRequired: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -312,7 +312,7 @@ export const MCP_TOOLS: MCPToolDefinition[] = [
   {
     name: 'sell_tokens',
     description: 'Sells a token on DEX (Uniswap/1inch) for ETH, USDT, or native crypto. SIGNS AND BROADCASTS ON-CHAIN AUTOMATICALLY USING NORTHVEIL CUSTODIAL SERVER-SIDE SIGNER. DO NOT ASK THE USER FOR A PRIVATE KEY OR SEED PHRASE.',
-    annotations: { readOnly: false, destructive: true, confirmationRequired: true },
+    annotations: { readOnly: false, destructive: true, confirmationRequired: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -335,7 +335,7 @@ export const MCP_TOOLS: MCPToolDefinition[] = [
   {
     name: 'trade_tokens',
     description: 'Trades or swaps one cryptocurrency token for another on-chain. SIGNS AND BROADCASTS ON-CHAIN AUTOMATICALLY USING NORTHVEIL CUSTODIAL SERVER-SIDE SIGNER. DO NOT ASK THE USER FOR A PRIVATE KEY OR SEED PHRASE.',
-    annotations: { readOnly: false, destructive: true, confirmationRequired: true },
+    annotations: { readOnly: false, destructive: true, confirmationRequired: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -1025,7 +1025,7 @@ export const MCP_TOOLS: MCPToolDefinition[] = [
   {
     name: 'set_trade_order',
     description: 'Sets a stop-loss or take-profit price trigger order on a token. When the real-time market price crosses the trigger threshold, the order auto-executes a swap on-chain via DEX aggregator. Monitors prices every 30 seconds. Works on EVM chains and Solana.',
-    annotations: { readOnly: false, destructive: false, confirmationRequired: true },
+    annotations: { readOnly: false, destructive: false, confirmationRequired: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -1069,7 +1069,7 @@ export const MCP_TOOLS: MCPToolDefinition[] = [
   {
     name: 'cancel_trade_order',
     description: 'Cancels an active stop-loss or take-profit trade order by its order ID. The order will stop monitoring prices and will NOT execute.',
-    annotations: { readOnly: false, destructive: false, confirmationRequired: true },
+    annotations: { readOnly: false, destructive: false, confirmationRequired: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -1136,7 +1136,7 @@ export const MCP_TOOLS: MCPToolDefinition[] = [
   {
     name: 'mint_tokens',
     description: 'Mints new tokens from a deployed ERC-20 contract where the connected wallet is the contract owner or has minter role. Calls the contract\'s mint(address,uint256) function on-chain. Signs and broadcasts via Northveil custodial signer.',
-    annotations: { readOnly: false, destructive: true, confirmationRequired: true },
+    annotations: { readOnly: false, destructive: true, confirmationRequired: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -1161,7 +1161,7 @@ export const MCP_TOOLS: MCPToolDefinition[] = [
   {
     name: 'reserve_tokens',
     description: 'Creates a time-locked token reservation. Transfers tokens from the wallet into escrow and records a reservation in Northveil\'s database with an unlock date. Tokens can be claimed by the recipient after the unlock date. Useful for vesting schedules, team allocations, and investor lockups.',
-    annotations: { readOnly: false, destructive: true, confirmationRequired: true },
+    annotations: { readOnly: false, destructive: true, confirmationRequired: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -1190,7 +1190,7 @@ export const MCP_TOOLS: MCPToolDefinition[] = [
   {
     name: 'make_reservation',
     description: 'Creates a real-world web3 reservation & booking ticket for flights, movie tickets, hotel rooms, concert/event passes, dining, or rentals paid with crypto. Generates an official digital booking pass, ticket ID, confirmation QR code payload, and settles payment via connected wallet.',
-    annotations: { readOnly: false, destructive: true, confirmationRequired: true },
+    annotations: { readOnly: false, destructive: true, confirmationRequired: false },
     inputSchema: {
       type: 'object',
       properties: {
