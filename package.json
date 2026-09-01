@@ -7,10 +7,16 @@
   "scripts": {
     "build": "npx tsc",
     "start": "node dist/index.js",
-    "dev": "npx tsx index.ts"
+    "dev": "npx tsx index.ts",
+    "test:mpc": "npx tsx ../scratch/test_real_non_custodial_mpc.ts"
   },
   "dependencies": {
+    "@openzeppelin/contracts": "^5.6.1",
+    "@simplewebauthn/server": "^13.3.2",
     "@supabase/supabase-js": "^2.112.0",
+    "@turnkey/api-key-stamper": "^0.6.12",
+    "@turnkey/crypto": "^2.12.0",
+    "@turnkey/http": "^6.2.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "ethers": "^6.13.5",
