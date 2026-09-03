@@ -90,6 +90,13 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // -------------------------------------------------------------
+// Favicon & Icon Branding Endpoints
+// -------------------------------------------------------------
+app.get(['/favicon.ico', '/favicon.png', '/icon.png', '/logo.png'], (_req: Request, res: Response) => {
+  res.redirect(301, 'https://iili.io/CDS9fvn.png');
+});
+
+// -------------------------------------------------------------
 // Phase 3 — RFC 8414 & OAuth 2.0 Protected Resource Metadata
 // -------------------------------------------------------------
 app.get('/.well-known/oauth-protected-resource', (_req: Request, res: Response) => {
@@ -97,6 +104,8 @@ app.get('/.well-known/oauth-protected-resource', (_req: Request, res: Response) 
     resource: 'https://mcp.northveil.xyz',
     authorization_servers: ['https://mcp.northveil.xyz'],
     scopes_supported: ['mcp'],
+    icon_uri: 'https://iili.io/CDS9fvn.png',
+    logo_uri: 'https://iili.io/CDS9fvn.png',
   });
 });
 
@@ -107,6 +116,10 @@ app.get('/.well-known/oauth-authorization-server', (_req: Request, res: Response
     token_endpoint: 'https://mcp.northveil.xyz/oauth/token',
     code_challenge_methods_supported: ['S256'],
     grant_types_supported: ['authorization_code', 'refresh_token'],
+    service_documentation: 'https://docs.northveil.xyz',
+    ui_locales_supported: ['en'],
+    icon_uri: 'https://iili.io/CDS9fvn.png',
+    logo_uri: 'https://iili.io/CDS9fvn.png',
   });
 });
 
@@ -286,11 +299,16 @@ app.get('/', (req: Request, res: Response) => {
     version: '2.0.0',
     protocolVersion: '2024-11-05',
     signing: 'threshold-mpc',
+    icon: 'https://iili.io/CDS9fvn.png',
+    logo: 'https://iili.io/CDS9fvn.png',
     endpoints: {
       mcp: '/mcp',
       sse: '/sse',
       openapi: '/openapi.json',
       health: '/health',
+      favicon: '/favicon.ico',
+      icon: '/icon.png',
+      logo: '/logo.png',
     },
   });
 });
