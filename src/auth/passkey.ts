@@ -1,7 +1,11 @@
-import {
-  verifyAuthenticationResponse,
-  verifyRegistrationResponse,
-} from '@simplewebauthn/server';
+let simpleWebAuthnPromise: Promise<typeof import('@simplewebauthn/server')> | null = null;
+
+async function getSimpleWebAuthn() {
+  if (!simpleWebAuthnPromise) {
+    simpleWebAuthnPromise = import('@simplewebauthn/server');
+  }
+  return simpleWebAuthnPromise;
+}
 
 const defaultRpID = process.env.WEBAUTHN_RP_ID || 'wallet.northveil.xyz';
 const defaultOrigin = process.env.WEBAUTHN_ORIGIN || 'https://wallet.northveil.xyz';
@@ -22,6 +26,8 @@ export async function verifyPasskeyRegistration(opts: {
   rpID?: string;
   origin?: string;
 }) {
+  const { verifyRegistrationResponse } = await getSimpleWebAuthn();
+
   const verifyOpts = {
     response: opts.response,
     expectedChallenge: opts.expectedChallenge,
@@ -59,6 +65,8 @@ export async function verifyPasskeyForPayload(opts: {
   origin?: string;
   storedAuthenticator: StoredAuthenticator;
 }) {
+  const { verifyAuthenticationResponse } = await getSimpleWebAuthn();
+
   const verifyOpts = {
     response: opts.response,
     expectedChallenge: opts.expectedChallenge,

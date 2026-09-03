@@ -144,11 +144,15 @@ if (isStdioMode) {
     }
   });
 } else {
-  // HTTP server mode
-  const PORT = process.env.PORT || 3001;
-  app.listen(PORT, () => {
-    console.log(`[Northveil-MCP] Server listening on port ${PORT} (Non-custodial control plane)`);
-  });
+  // HTTP server mode (only bind port in standalone daemon mode, not in Vercel/Serverless)
+  const isServerless = !!process.env.VERCEL || !!process.env.AWS_LAMBDA_FUNCTION_NAME || !!process.env.NETLIFY;
+  if (!isServerless) {
+    const PORT = process.env.PORT || 3001;
+    app.listen(PORT, () => {
+      console.log(`[Northveil-MCP] Server listening on port ${PORT} (Non-custodial control plane)`);
+    });
+  }
 }
 
+export default app;
 export * from './src/server.js';

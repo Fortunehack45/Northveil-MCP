@@ -24,6 +24,7 @@
     "express": "^4.21.2",
     "express-rate-limit": "^8.6.2",
     "solc": "^0.8.36",
+    "tsyringe": "^4.8.0",
     "uuid": "^11.1.0"
   },
   "devDependencies": {

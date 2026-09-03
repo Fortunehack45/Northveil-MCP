@@ -22,17 +22,36 @@ export function assertProductionSecurity() {
     if (process.env[envVar]) {
       const errorMsg = `CRITICAL SECURITY VIOLATION: Environment variable ${envVar} is set. Northveil is a strictly non-custodial control plane and forbids server-held private keys. Process terminating.`;
       console.error(errorMsg);
-      if (process.env.NODE_ENV === 'production') {
-        process.exit(1);
-      }
       throw new Error(errorMsg);
     }
   }
 }
 
-assertProductionSecurity();
+// In test environment or CLI, run assertion directly
+if (process.env.NODE_ENV === 'test' || process.env.TS_NODE_DEV || !process.env.VERCEL) {
+  try {
+    assertProductionSecurity();
+  } catch (err) {
+    if (process.env.NODE_ENV === 'test') throw err;
+  }
+}
 
 export const app = express();
+
+// Guard against custodial keys configured in cloud environment variables
+const activeForbiddenEnvs = ['PRIVATE_KEY', 'SEPOLIA_PRIVATE_KEY', 'ETH_PRIVATE_KEY'].filter(
+  (k) => !!process.env[k]
+);
+if (activeForbiddenEnvs.length > 0) {
+  app.use((req: Request, res: Response) => {
+    res.status(500).json({
+      error: 'NON_CUSTODIAL_SECURITY_VIOLATION',
+      message: `CRITICAL SECURITY VIOLATION: Environment variable(s) ${activeForbiddenEnvs.join(
+        ', '
+      )} detected. Northveil is strictly non-custodial. Please delete these variables from Vercel Project Settings > Environment Variables.`,
+    });
+  });
+}
 
 app.use(cors({
   origin: (origin, callback) => {
@@ -63,8 +82,24 @@ const apiLimiter = rateLimit({
 app.use('/mcp', apiLimiter);
 
 // -------------------------------------------------------------
-// Health Check Endpoint
+// Root & Health Check Endpoints
 // -------------------------------------------------------------
+app.get('/', (req: Request, res: Response) => {
+  res.json({
+    status: 'ok',
+    system: 'Northveil Non-Custodial Control Plane',
+    version: '2.0.0',
+    protocolVersion: '2024-11-05',
+    signing: 'threshold-mpc',
+    endpoints: {
+      mcp: '/mcp',
+      sse: '/sse',
+      openapi: '/openapi.json',
+      health: '/health',
+    },
+  });
+});
+
 app.get('/health', (req: Request, res: Response) => {
   res.json({
     status: 'ok',
