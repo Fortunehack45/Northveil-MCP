@@ -75,6 +75,35 @@ export function verifySessionToken(token: string): SessionPayload | null {
 }
 
 /**
+ * Helper to get active session without throwing
+ */
+export function getSession(req: Request): SessionPayload | null {
+  let token: string | undefined;
+  const cookieHeader = req.headers.cookie;
+  if (cookieHeader) {
+    const match = cookieHeader.match(/nv_session=([^;]+)/);
+    if (match) token = match[1];
+  }
+  if (!token) {
+    const auth = req.headers.authorization;
+    if (auth && auth.startsWith('Bearer ')) {
+      const candidate = auth.slice(7).trim();
+      if (!candidate.startsWith('nv_live_') && !candidate.startsWith('nv_oauth_')) {
+        token = candidate;
+      }
+    }
+  }
+  if (!token && typeof req.headers['x-session-token'] === 'string') {
+    token = req.headers['x-session-token'];
+  }
+  if (!token && typeof req.query?.sessionToken === 'string') {
+    token = req.query.sessionToken as string;
+  }
+  if (!token) return null;
+  return verifySessionToken(token);
+}
+
+/**
  * Express middleware requiring a valid user session
  */
 export async function requireSession(req: Request, res: Response, next: NextFunction) {

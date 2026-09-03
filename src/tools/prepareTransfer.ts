@@ -153,6 +153,13 @@ export async function prepareTransfer(
 
   // Autonomous Path: Direct MPC Sign inside Enclave
   if (decision.type === 'allow_autonomous') {
+    if (!process.env.TURNKEY_API_PRIVATE_KEY) {
+      return {
+        status: 'ERROR',
+        error: 'SIGNER_NOT_CONFIGURED',
+      };
+    }
+
     try {
       const mpcProvider = getMpcProvider();
       const signed = await mpcProvider.signAndBroadcast({
@@ -217,7 +224,7 @@ export async function prepareTransfer(
     details: { approvalId: approval.id, payloadHash, to, amount: args.amount, chain },
   });
 
-  const approveUrl = `https://wallet.northveil.xyz/approve/${approval.id}`;
+  const approveUrl = `https://wallet.northveil.xyz/?action=approvals&id=${approval.id}`;
 
   return {
     status: 'APPROVAL_REQUIRED',

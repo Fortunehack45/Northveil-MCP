@@ -137,3 +137,46 @@ alter table public.grants add column if not exists allow_mints boolean default f
 alter table public.grants add column if not exists allow_positions boolean default false;
 alter table public.grants add column if not exists allow_deploys_autonomous boolean default false;
 alter table public.grants add column if not exists max_usd_per_tx numeric;
+
+-- 11. OAuth Clients (e.g. Claude.ai, Claude Desktop, Cursor)
+create table if not exists public.oauth_clients (
+  id text primary key,
+  name text not null,
+  redirect_uri_prefixes text[] not null,
+  created_at timestamptz not null default now()
+);
+
+-- 12. OAuth Authorization Codes (S256 PKCE with short TTL)
+create table if not exists public.oauth_codes (
+  code_hash text primary key,
+  client_id text not null references public.oauth_clients(id) on delete cascade,
+  user_id uuid not null references public.users(id) on delete cascade,
+  redirect_uri text not null,
+  code_challenge text not null,
+  code_challenge_method text not null default 'S256',
+  scope text not null default 'mcp',
+  used boolean not null default false,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now()
+);
+
+-- 13. OAuth Access Tokens (Bearer tokens issued to Claude/agents)
+create table if not exists public.oauth_tokens (
+  id uuid primary key default gen_random_uuid(),
+  token_hash text not null unique,
+  user_id uuid not null references public.users(id) on delete cascade,
+  client_id text not null references public.oauth_clients(id) on delete cascade,
+  scope text not null default 'mcp',
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_oauth_tokens_hash on public.oauth_tokens (token_hash);
+create index if not exists idx_oauth_tokens_user on public.oauth_tokens (user_id);
+create index if not exists idx_oauth_codes_hash on public.oauth_codes (code_hash);
+
+-- Seed Claude OAuth client
+insert into public.oauth_clients (id, name, redirect_uri_prefixes)
+values ('claude', 'Claude', array['https://claude.ai/', 'https://claude.com/'])
+on conflict (id) do nothing;
+
