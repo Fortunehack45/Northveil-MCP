@@ -90,13 +90,6 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // -------------------------------------------------------------
-// Favicon & Icon Branding Endpoints
-// -------------------------------------------------------------
-app.get(['/favicon.ico', '/favicon.png', '/icon.png', '/logo.png'], (_req: Request, res: Response) => {
-  res.redirect(301, 'https://iili.io/CDS9fvn.png');
-});
-
-// -------------------------------------------------------------
 // Phase 3 — RFC 8414 & OAuth 2.0 Protected Resource Metadata
 // -------------------------------------------------------------
 app.get('/.well-known/oauth-protected-resource', (_req: Request, res: Response) => {
@@ -104,6 +97,7 @@ app.get('/.well-known/oauth-protected-resource', (_req: Request, res: Response) 
     resource: 'https://mcp.northveil.xyz',
     authorization_servers: ['https://mcp.northveil.xyz'],
     scopes_supported: ['mcp'],
+    resource_documentation: 'https://mcp.northveil.xyz',
     icon_uri: 'https://iili.io/CDS9fvn.png',
     logo_uri: 'https://iili.io/CDS9fvn.png',
   });
@@ -116,8 +110,7 @@ app.get('/.well-known/oauth-authorization-server', (_req: Request, res: Response
     token_endpoint: 'https://mcp.northveil.xyz/oauth/token',
     code_challenge_methods_supported: ['S256'],
     grant_types_supported: ['authorization_code', 'refresh_token'],
-    service_documentation: 'https://docs.northveil.xyz',
-    ui_locales_supported: ['en'],
+    service_documentation: 'https://mcp.northveil.xyz',
     icon_uri: 'https://iili.io/CDS9fvn.png',
     logo_uri: 'https://iili.io/CDS9fvn.png',
   });
@@ -290,9 +283,163 @@ const apiLimiter = rateLimit({
 app.use('/mcp', apiLimiter);
 
 // -------------------------------------------------------------
-// Root & Health Check Endpoints
+// Static branding & favicon routes
+// -------------------------------------------------------------
+app.get('/favicon.ico', (_req: Request, res: Response) => {
+  res.redirect(302, 'https://iili.io/CDS9fvn.png');
+});
+
+app.get('/logo.png', (_req: Request, res: Response) => {
+  res.redirect(302, 'https://iili.io/CDS9fvn.png');
+});
+
+app.get('/icon.png', (_req: Request, res: Response) => {
+  res.redirect(302, 'https://iili.io/CDS9fvn.png');
+});
+
+// -------------------------------------------------------------
+// Root Landing & Health Check Endpoints
 // -------------------------------------------------------------
 app.get('/', (req: Request, res: Response) => {
+  const acceptsHtml = req.headers.accept && req.headers.accept.includes('text/html');
+  if (acceptsHtml) {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    return res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Northveil MCP Control Plane</title>
+  <link rel="icon" type="image/png" href="https://iili.io/CDS9fvn.png">
+  <link rel="shortcut icon" href="https://iili.io/CDS9fvn.png">
+  <link rel="apple-touch-icon" href="https://iili.io/CDS9fvn.png">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #09090b;
+      --card: #121215;
+      --border: rgba(255, 255, 255, 0.08);
+      --text: #fafafa;
+      --text-muted: #a1a1aa;
+      --accent: #3b82f6;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 1.5rem;
+      padding: 2.5rem;
+      max-width: 520px;
+      width: 100%;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.6);
+      text-align: center;
+    }
+    .logo-container {
+      width: 72px;
+      height: 72px;
+      margin: 0 auto 1.5rem;
+      border-radius: 1.25rem;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.04);
+      padding: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .logo-container img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+    h1 { font-size: 1.5rem; font-weight: 700; margin-bottom: 0.5rem; }
+    p.subtitle { color: var(--text-muted); font-size: 0.875rem; margin-bottom: 1.75rem; }
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: rgba(16, 185, 129, 0.12);
+      color: #34d399;
+      padding: 0.35rem 0.85rem;
+      border-radius: 9999px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      margin-bottom: 2rem;
+      border: 1px solid rgba(16, 185, 129, 0.2);
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      background: #10b981;
+      border-radius: 50%;
+      box-shadow: 0 0 10px #10b981;
+    }
+    .info-box {
+      background: rgba(0,0,0,0.4);
+      border: 1px solid var(--border);
+      border-radius: 1rem;
+      padding: 1.25rem;
+      text-align: left;
+      margin-bottom: 1.5rem;
+      font-size: 0.825rem;
+    }
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 0.75rem;
+    }
+    .info-row:last-child { margin-bottom: 0; }
+    .label { color: var(--text-muted); }
+    .value { font-family: monospace; font-weight: 600; color: #60a5fa; }
+    .footer-note { font-size: 0.75rem; color: var(--text-muted); }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo-container">
+      <img src="https://iili.io/CDS9fvn.png" alt="Northveil MCP Logo">
+    </div>
+    <h1>Northveil MCP</h1>
+    <p class="subtitle">Non-Custodial Agent Wallet & Gateway Control Plane</p>
+    <div class="status-badge">
+      <span class="status-dot"></span>
+      OPERATIONAL • THRESHOLD MPC
+    </div>
+    <div class="info-box">
+      <div class="info-row">
+        <span class="label">Protocol Version</span>
+        <span class="value">2024-11-05</span>
+      </div>
+      <div class="info-row">
+        <span class="label">Connector URL</span>
+        <span class="value">https://mcp.northveil.xyz/sse</span>
+      </div>
+      <div class="info-row">
+        <span class="label">OAuth Gateway</span>
+        <span class="value">RFC 8414 (S256 PKCE)</span>
+      </div>
+      <div class="info-row">
+        <span class="label">Key Custody</span>
+        <span class="value">None (Multi-Party TEE)</span>
+      </div>
+    </div>
+    <p class="footer-note">Add connector in Claude.ai &bull; Authorized via WebAuthn Passkeys</p>
+  </div>
+</body>
+</html>`);
+  }
+
   res.json({
     status: 'ok',
     system: 'Northveil Non-Custodial Control Plane',
@@ -306,9 +453,6 @@ app.get('/', (req: Request, res: Response) => {
       sse: '/sse',
       openapi: '/openapi.json',
       health: '/health',
-      favicon: '/favicon.ico',
-      icon: '/icon.png',
-      logo: '/logo.png',
     },
   });
 });
@@ -534,7 +678,13 @@ app.post('/mcp', async (req: Request, res: Response) => {
         result: {
           protocolVersion: '2024-11-05',
           capabilities: { tools: {} },
-          serverInfo: { name: 'northveil-mcp', version: '2.0.0' },
+          serverInfo: {
+            name: 'northveil-mcp',
+            version: '2.0.0',
+            iconUrl: 'https://iili.io/CDS9fvn.png',
+            logoUrl: 'https://iili.io/CDS9fvn.png',
+            icon: 'https://iili.io/CDS9fvn.png',
+          },
         },
       });
     }
@@ -658,7 +808,13 @@ app.post('/message', async (req: Request, res: Response) => {
         result: {
           protocolVersion: '2024-11-05',
           capabilities: { tools: {} },
-          serverInfo: { name: 'northveil-mcp', version: '2.0.0' },
+          serverInfo: {
+            name: 'northveil-mcp',
+            version: '2.0.0',
+            iconUrl: 'https://iili.io/CDS9fvn.png',
+            logoUrl: 'https://iili.io/CDS9fvn.png',
+            icon: 'https://iili.io/CDS9fvn.png',
+          },
         },
       };
       if (sseClient) {
@@ -1160,6 +1316,9 @@ app.get('/openapi.json', (req: Request, res: Response) => {
       title: 'Northveil MCP API',
       version: '2.0.0',
       description: 'Northveil Non-Custodial Agent Wallet & Control Plane API',
+      'x-logo': {
+        url: 'https://iili.io/CDS9fvn.png',
+      },
     },
     servers: [{ url: 'https://mcp.northveil.xyz' }],
     components: {
