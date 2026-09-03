@@ -182,7 +182,7 @@ function devMockProvider(): MpcProvider {
   return {
     async createWallet() {
       return {
-        mpcWalletId: 'mock-mpc-wallet-' + Math.random().toString(36).slice(2, 10),
+        mpcWalletId: 'mock-mpc-wallet-' + crypto.randomUUID().replace(/-/g, '').slice(0, 12),
         address: '0x1111111111111111111111111111111111111111',
       };
     },

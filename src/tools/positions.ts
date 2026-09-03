@@ -37,7 +37,7 @@ export async function placePosition(ctx: ToolContext, args: {
   limitPriceUsd?: number;
   slippageBps?: number;
 }): Promise<Position> {
-  const positionId = 'pos_' + Math.random().toString(36).substring(2, 12);
+  const positionId = 'pos_' + crypto.randomUUID().replace(/-/g, '').slice(0, 16);
   const position: Position = {
     id: positionId,
     userId: ctx.userId,

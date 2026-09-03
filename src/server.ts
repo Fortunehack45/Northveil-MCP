@@ -124,19 +124,33 @@ app.get('/health', (req: Request, res: Response) => {
 // Tool Dispatcher
 // -------------------------------------------------------------
 async function executeTool(name: string, args: Record<string, any>, req: Request) {
+  // Public inspection tools (no wallet context required)
+  if (name === 'nv_health') {
+    return {
+      status: 'ok',
+      system: 'Northveil Non-Custodial Control Plane',
+      custody: 'none',
+      signing: 'threshold_mpc',
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  if (name === 'nv_list_networks') {
+    return {
+      writeReadyChains: WRITE_CHAINS,
+      readOnlyChains: READ_EXTRA_CHAINS,
+      allSupported: Object.keys(SUPPORTED_CHAINS),
+    };
+  }
+
+  if (name === 'nv_get_token_price') {
+    return await getTokenPrice(args.symbol);
+  }
+
+  // All wallet operations require verified client key and grant context
   const ctx = await resolveContext(req, args);
 
   switch (name) {
-    // 1. nv_health
-    case 'nv_health':
-      return {
-        status: 'ok',
-        system: 'Northveil Non-Custodial Control Plane',
-        custody: 'none',
-        signing: 'threshold_mpc',
-        timestamp: new Date().toISOString(),
-      };
-
     // 2. nv_list_wallets
     case 'nv_list_wallets':
     case 'get_wallet_info':
@@ -153,14 +167,6 @@ async function executeTool(name: string, args: Record<string, any>, req: Request
         allowedAssets: ctx.grant.allowedAssets,
         maxWeiPerTx: ctx.grant.maxWeiPerTx.toString(),
         maxWeiPerDay: ctx.grant.maxWeiPerDay.toString(),
-      };
-
-    // 3. nv_list_networks
-    case 'nv_list_networks':
-      return {
-        writeReadyChains: WRITE_CHAINS,
-        readOnlyChains: READ_EXTRA_CHAINS,
-        allSupported: Object.keys(SUPPORTED_CHAINS),
       };
 
     // 4. nv_get_balances
@@ -389,7 +395,7 @@ app.get('/sse', (req: Request, res: Response) => {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
-  const sessionId = 'sse_' + Math.random().toString(36).slice(2, 12);
+  const sessionId = 'sse_' + crypto.randomUUID().replace(/-/g, '').slice(0, 16);
   sseClients.set(sessionId, res);
 
   res.write(`event: endpoint\ndata: /message?sessionId=${sessionId}\n\n`);
