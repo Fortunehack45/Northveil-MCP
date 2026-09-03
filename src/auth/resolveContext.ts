@@ -78,6 +78,12 @@ export function extractClientKey(req: Request): string | null {
     return xApiKey.trim();
   }
 
+  // Also support URL query parameter authentication for direct 1-click connectors
+  const queryKey = (req.query?.apiKey || req.query?.client_key || req.query?.key) as string | undefined;
+  if (queryKey && typeof queryKey === 'string' && queryKey.startsWith('nv_live_')) {
+    return queryKey.trim();
+  }
+
   return null;
 }
 
