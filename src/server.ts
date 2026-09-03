@@ -21,6 +21,10 @@ import { prepareDeployToken } from './tools/deployToken.js';
 import { prepareDeployNft, prepareMintNft, prepareMintToken } from './tools/deployNft.js';
 import { prepareContractCall } from './tools/contractCall.js';
 import { placePosition, cancelPosition, listPositions } from './tools/positions.js';
+import { requireSession, signSessionToken } from './auth/session.js';
+import { getTxHistory } from './read/history.js';
+import { exchangeGoogleCode, upsertGoogleUser } from './auth/google.js';
+import crypto from 'node:crypto';
 
 
 // -------------------------------------------------------------
@@ -505,6 +509,359 @@ app.post('/api/approvals/:id/complete', async (req: Request, res: Response) => {
     });
   } catch (err: any) {
     return res.status(400).json({ error: err.message || 'Approval execution failed' });
+  }
+});
+
+// Alias: POST /wallet/approvals/:id/complete -> same as /api/approvals/:id/complete
+app.post('/wallet/approvals/:id/complete', async (req: Request, res: Response) => {
+  const approvalId = req.params.id;
+  const { assertionResponse, credentialId } = req.body;
+
+  try {
+    const ticket = getApproval(approvalId);
+    if (!ticket) {
+      return res.status(404).json({ error: 'UNKNOWN_APPROVAL' });
+    }
+
+    await consumeApproval(approvalId, ticket.payloadHash);
+
+    if (process.env.NODE_ENV === 'production' && assertionResponse) {
+      const { data: passkeyRecord } = await supabase
+        .from('passkeys')
+        .select('*')
+        .eq('credential_id', credentialId)
+        .eq('user_id', ticket.userId)
+        .single();
+
+      if (!passkeyRecord) {
+        return res.status(403).json({ error: 'UNAUTHORIZED_PASSKEY_CREDENTIAL' });
+      }
+
+      await verifyPasskeyForPayload({
+        response: assertionResponse,
+        expectedChallenge: Buffer.from(ticket.payloadHash.replace(/^0x/, ''), 'hex').toString('base64url'),
+        storedAuthenticator: {
+          credentialID: Buffer.from(passkeyRecord.credential_id, 'base64url'),
+          credentialPublicKey: Buffer.from(passkeyRecord.credential_public_key),
+          counter: Number(passkeyRecord.counter),
+        },
+      });
+    }
+
+    const mpc = getMpcProvider();
+    const signResult = await mpc.signAndBroadcast({
+      mpcWalletId: ticket.walletId || 'turnkey-wallet',
+      unsignedTx: ticket.canonicalTx as any,
+      payloadHash: ticket.payloadHash,
+      approvalEvidence: { type: 'passkey', approvalId: ticket.id },
+    });
+
+    await logAudit({
+      userId: ticket.userId,
+      walletAddress: ticket.walletAddress,
+      clientId: ticket.clientId,
+      action: 'APPROVAL_EXECUTED_PASSKEY',
+      details: { approvalId, txHash: signResult.txHash },
+    });
+
+    return res.json({
+      status: 'EXECUTED',
+      txHash: signResult.txHash,
+      approvalId,
+    });
+  } catch (err: any) {
+    return res.status(400).json({ error: err.message || 'Approval execution failed' });
+  }
+});
+
+// -------------------------------------------------------------
+// Live Wallet & Session Endpoints
+// -------------------------------------------------------------
+
+// GET /wallet/me - authenticated user profile and active wallet
+app.get('/wallet/me', requireSession, async (req: Request, res: Response) => {
+  res.json({
+    user: req.session!.user,
+    wallet: req.session!.wallet || null,
+  });
+});
+
+// GET /wallet/portfolio - multi-chain balance rollup for user's wallet
+app.get('/wallet/portfolio', requireSession, async (req: Request, res: Response) => {
+  if (!req.session?.wallet?.address) {
+    return res.json({ address: null, assets: [], totalUsdValue: 0 });
+  }
+
+  const address = req.session.wallet.address;
+  try {
+    const balances = await getBalances(address, 'all');
+    let totalUsdValue = 0;
+
+    const assets = await Promise.all(
+      balances.map(async (b) => {
+        const priceData = await getTokenPrice(b.native.symbol);
+        const priceUsd = priceData.priceUsd || 0;
+        const balanceNum = parseFloat(b.native.balanceFormatted) || 0;
+        const valueUsd = balanceNum * priceUsd;
+        totalUsdValue += valueUsd;
+
+        return {
+          id: `${b.chain}-native`,
+          symbol: b.native.symbol,
+          name: b.native.name,
+          network: b.chain,
+          balance: balanceNum,
+          priceUsd,
+          valueUsd,
+          icon: (SUPPORTED_CHAINS as any)[b.chain]?.icon || '',
+          explorerUrl: (SUPPORTED_CHAINS as any)[b.chain]?.explorerUrl || '',
+        };
+      })
+    );
+
+    res.json({
+      address,
+      assets,
+      totalUsdValue,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: 'PORTFOLIO_QUERY_FAILED', message: err.message });
+  }
+});
+
+// GET /wallet/history - real on-chain indexer txs + MCP audit logs
+app.get('/wallet/history', requireSession, async (req: Request, res: Response) => {
+  if (!req.session?.wallet?.address) {
+    return res.json({ address: null, items: [] });
+  }
+
+  const chain = (req.query.chain as string) || 'base';
+  const history = await getTxHistory(req.session.wallet.address, chain);
+  res.json(history);
+});
+
+// GET /wallet/approvals - pending approvals or history
+app.get('/wallet/approvals', requireSession, async (req: Request, res: Response) => {
+  const status = req.query.status as string;
+  const userId = req.session!.userId;
+
+  if (status === 'pending') {
+    const { data } = await supabase
+      .from('pending_approvals')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('used', false)
+      .gt('expires_at', new Date().toISOString())
+      .order('created_at', { ascending: false });
+    return res.json(data ?? []);
+  }
+
+  const { data: usedApprovals } = await supabase
+    .from('pending_approvals')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('used', true)
+    .order('created_at', { ascending: false })
+    .limit(50);
+
+  const { data: auditLogs } = await supabase
+    .from('audit_logs')
+    .select('*')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false })
+    .limit(50);
+
+  res.json({
+    approvals: usedApprovals ?? [],
+    auditLogs: auditLogs ?? [],
+  });
+});
+
+// POST /wallet/agent-clients - issue client key and default grant
+app.post('/wallet/agent-clients', requireSession, async (req: Request, res: Response) => {
+  const userId = req.session!.userId;
+  const name = req.body?.name || 'Claude Desktop';
+  const { rawOnce, hash } = await issueClientKey();
+
+  const { data: client, error: clientErr } = await supabase
+    .from('agent_clients')
+    .insert({
+      user_id: userId,
+      name,
+      client_key_hash: hash,
+      status: 'active',
+      expires_at: new Date(Date.now() + 365 * 86400000).toISOString(),
+    })
+    .select('*')
+    .single();
+
+  if (clientErr || !client) {
+    return res.status(500).json({ error: 'FAILED_TO_CREATE_AGENT_CLIENT', details: clientErr?.message });
+  }
+
+  await supabase
+    .from('grants')
+    .insert({
+      client_id: client.id,
+      user_id: userId,
+      wallet_ids: req.session!.wallet?.id ? [req.session!.wallet.id] : [],
+      mode: 'always_ask',
+      chains: ['base', 'ethereum', 'arbitrum', 'polygon', 'solana'],
+      allowed_assets: ['*'],
+      allowed_recipients: [],
+      allow_any_recipient: false,
+      max_wei_per_tx: '100000000000000000',
+      max_wei_per_day: '1000000000000000000',
+    });
+
+  await logAudit({
+    userId,
+    clientId: client.id,
+    action: 'AGENT_KEY_ISSUED',
+    details: { name, clientId: client.id },
+  });
+
+  return res.json({
+    clientId: client.id,
+    rawOnce,
+    name: client.name,
+    status: client.status,
+    mode: 'always_ask',
+  });
+});
+
+// PATCH /wallet/agent-clients/:id - pause or revoke agent key
+app.patch('/wallet/agent-clients/:id', requireSession, async (req: Request, res: Response) => {
+  const userId = req.session!.userId;
+  const clientId = req.params.id;
+  const { status } = req.body;
+
+  if (!['active', 'paused', 'revoked'].includes(status)) {
+    return res.status(400).json({ error: 'INVALID_STATUS' });
+  }
+
+  const { data, error } = await supabase
+    .from('agent_clients')
+    .update({ status })
+    .eq('id', clientId)
+    .eq('user_id', userId)
+    .select('*')
+    .single();
+
+  if (error) {
+    return res.status(500).json({ error: 'UPDATE_FAILED', details: error.message });
+  }
+
+  return res.json({ success: true, client: data });
+});
+
+// PATCH /wallet/grants/:id - update grant mode / velocity limits
+app.patch('/wallet/grants/:id', requireSession, async (req: Request, res: Response) => {
+  const userId = req.session!.userId;
+  const grantId = req.params.id;
+  const { mode, maxWeiPerTx, maxWeiPerDay, allowedRecipients, allowAnyRecipient } = req.body;
+
+  const updates: any = { updated_at: new Date().toISOString() };
+  if (mode && ['always_ask', 'autonomous'].includes(mode)) updates.mode = mode;
+  if (maxWeiPerTx) updates.max_wei_per_tx = String(maxWeiPerTx);
+  if (maxWeiPerDay) updates.max_wei_per_day = String(maxWeiPerDay);
+  if (allowedRecipients) updates.allowed_recipients = allowedRecipients;
+  if (allowAnyRecipient !== undefined) updates.allow_any_recipient = Boolean(allowAnyRecipient);
+
+  const { data, error } = await supabase
+    .from('grants')
+    .update(updates)
+    .eq('id', grantId)
+    .eq('user_id', userId)
+    .select('*')
+    .single();
+
+  if (error) {
+    return res.status(500).json({ error: 'UPDATE_GRANT_FAILED', details: error.message });
+  }
+
+  return res.json({ success: true, grant: data });
+});
+
+// -------------------------------------------------------------
+// Google OAuth Endpoints (Vite SPA Backend)
+// -------------------------------------------------------------
+app.get('/auth/google/start', (req: Request, res: Response) => {
+  const redirect = (req.query.redirect as string) || 'https://wallet.northveil.xyz/';
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  if (!clientId) {
+    return res.status(500).json({ error: 'GOOGLE_CLIENT_ID_NOT_CONFIGURED' });
+  }
+
+  const state = Buffer.from(JSON.stringify({ redirect, nonce: crypto.randomBytes(16).toString('hex') })).toString('base64url');
+  const callbackUrl = `${req.protocol}://${req.get('host')}/auth/google/callback`;
+  const scope = encodeURIComponent('openid email profile');
+  const googleAuthUrl = `https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(callbackUrl)}&scope=${scope}&state=${state}&prompt=consent&access_type=offline`;
+
+  res.redirect(googleAuthUrl);
+});
+
+app.get('/auth/google/callback', async (req: Request, res: Response) => {
+  const code = req.query.code as string;
+  const stateRaw = req.query.state as string;
+
+  let redirectTarget = 'https://wallet.northveil.xyz/';
+  if (stateRaw) {
+    try {
+      const parsed = JSON.parse(Buffer.from(stateRaw, 'base64url').toString('utf8'));
+      if (parsed.redirect) redirectTarget = parsed.redirect;
+    } catch {}
+  }
+
+  if (!code) {
+    return res.redirect(`${redirectTarget}?error=OAUTH_CODE_MISSING`);
+  }
+
+  try {
+    const callbackUrl = `${req.protocol}://${req.get('host')}/auth/google/callback`;
+    const userInfo = await exchangeGoogleCode(code, '', callbackUrl);
+    const user = await upsertGoogleUser(userInfo);
+
+    const { data: existingWallet } = await supabase
+      .from('wallets')
+      .select('*')
+      .eq('user_id', user.id)
+      .eq('status', 'active')
+      .maybeSingle();
+
+    if (!existingWallet) {
+      try {
+        const mpc = getMpcProvider();
+        const created = await mpc.createWallet(user.id);
+        await supabase.from('wallets').insert({
+          user_id: user.id,
+          address: created.address,
+          chain_family: 'evm',
+          mpc_provider: 'turnkey',
+          mpc_wallet_id: created.mpcWalletId,
+          status: 'active',
+        });
+      } catch (mpcErr: any) {
+        console.warn('[Northveil] MPC wallet provision error:', mpcErr.message);
+      }
+    }
+
+    const sessionToken = signSessionToken({ userId: user.id, email: user.email });
+    const isProd = process.env.NODE_ENV === 'production';
+    res.cookie('nv_session', sessionToken, {
+      httpOnly: true,
+      secure: isProd,
+      sameSite: 'lax',
+      maxAge: 72 * 3600 * 1000,
+      domain: isProd ? '.northveil.xyz' : undefined,
+    });
+
+    const url = new URL(redirectTarget);
+    url.searchParams.set('sessionToken', sessionToken);
+    return res.redirect(url.toString());
+  } catch (err: any) {
+    console.error('[Northveil] Google OAuth callback error:', err);
+    return res.redirect(`${redirectTarget}?error=${encodeURIComponent(err.message || 'AUTH_FAILED')}`);
   }
 });
 
