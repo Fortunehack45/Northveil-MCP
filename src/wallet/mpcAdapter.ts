@@ -63,7 +63,7 @@ function turnkeyProvider(): MpcProvider {
       const organizationId = process.env.TURNKEY_ORGANIZATION_ID!;
       // Create wallet inside user's isolated partition in Turnkey enclave
       const activity = await client.createWallet({
-        type: 'ACTIVITY_TYPE_CREATE_WALLET',
+        type: 'ACTIVITY_TYPE_CREATE_WALLET' as any,
         organizationId,
         parameters: {
           walletName: `Northveil Vault User ${userId}`,
@@ -75,7 +75,7 @@ function turnkeyProvider(): MpcProvider {
               addressFormat: 'ADDRESS_FORMAT_ETHEREUM',
             },
           ],
-        },
+        } as any,
         timestampMs: String(Date.now()),
       });
 
@@ -141,13 +141,13 @@ function turnkeyProvider(): MpcProvider {
 
       // 2. Turnkey threshold sign in secure enclave
       const signActivity = await client.signTransaction({
-        type: 'ACTIVITY_TYPE_SIGN_TRANSACTION',
+        type: 'ACTIVITY_TYPE_SIGN_TRANSACTION_V2' as any,
         organizationId,
         parameters: {
           signWith: req.mpcWalletId,
           type: 'TRANSACTION_TYPE_ETHEREUM',
           unsignedTransaction: unsignedSerialized,
-        },
+        } as any,
         timestampMs: String(Date.now()),
       });
 
