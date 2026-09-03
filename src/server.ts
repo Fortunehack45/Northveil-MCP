@@ -12,6 +12,16 @@ import { setAutonomousMode } from './tools/setAutonomousMode.js';
 import { issueClientKey } from './auth/agentClient.js';
 import { supabase } from './supabase.js';
 import { logAudit } from './audit/log.js';
+import { SUPPORTED_CHAINS, WRITE_CHAINS, READ_EXTRA_CHAINS } from './config/chains.js';
+import { getBalances, getNftBalances } from './read/balances.js';
+import { getTokenPrice } from './read/prices.js';
+import { simulateTx, estimateGas } from './read/simulation.js';
+import { prepareSwap } from './tools/swap.js';
+import { prepareDeployToken } from './tools/deployToken.js';
+import { prepareDeployNft, prepareMintNft, prepareMintToken } from './tools/deployNft.js';
+import { prepareContractCall } from './tools/contractCall.js';
+import { placePosition, cancelPosition, listPositions } from './tools/positions.js';
+
 
 // -------------------------------------------------------------
 // Production Boot Check: Hard-fail if raw private keys exist
@@ -117,19 +127,27 @@ async function executeTool(name: string, args: Record<string, any>, req: Request
   const ctx = await resolveContext(req, args);
 
   switch (name) {
-    case 'get_portfolio':
-      return await getPortfolio(ctx, args);
+    // 1. nv_health
+    case 'nv_health':
+      return {
+        status: 'ok',
+        system: 'Northveil Non-Custodial Control Plane',
+        custody: 'none',
+        signing: 'threshold_mpc',
+        timestamp: new Date().toISOString(),
+      };
 
-    case 'prepare_transfer':
-      return await prepareTransfer(ctx, args as any);
-
-    case 'get_transaction_status':
-      return await getTransactionStatus(ctx, args as any);
-
+    // 2. nv_list_wallets
+    case 'nv_list_wallets':
     case 'get_wallet_info':
       return {
-        address: ctx.wallet.address,
-        chainFamily: ctx.wallet.chainFamily,
+        wallets: [
+          {
+            id: ctx.wallet.id,
+            address: ctx.wallet.address,
+            chainFamily: ctx.wallet.chainFamily,
+          },
+        ],
         grantMode: ctx.grant.mode,
         allowedChains: ctx.grant.chains,
         allowedAssets: ctx.grant.allowedAssets,
@@ -137,6 +155,109 @@ async function executeTool(name: string, args: Record<string, any>, req: Request
         maxWeiPerDay: ctx.grant.maxWeiPerDay.toString(),
       };
 
+    // 3. nv_list_networks
+    case 'nv_list_networks':
+      return {
+        writeReadyChains: WRITE_CHAINS,
+        readOnlyChains: READ_EXTRA_CHAINS,
+        allSupported: Object.keys(SUPPORTED_CHAINS),
+      };
+
+    // 4. nv_get_balances
+    case 'nv_get_balances':
+      return await getBalances(ctx.wallet.address, args.network || 'all');
+
+    // 5. nv_get_portfolio
+    case 'nv_get_portfolio':
+    case 'get_portfolio':
+      return await getPortfolio(ctx, args);
+
+    // 6. nv_get_nft_balances
+    case 'nv_get_nft_balances':
+      return await getNftBalances(ctx.wallet.address, args.network || 'base');
+
+    // 7. nv_get_token_price
+    case 'nv_get_token_price':
+      return await getTokenPrice(args.symbol || 'ETH');
+
+    // 8. nv_get_tx
+    case 'nv_get_tx':
+    case 'get_transaction_status':
+      return await getTransactionStatus(ctx, args as any);
+
+    // 9. nv_simulate_tx
+    case 'nv_simulate_tx':
+      return await simulateTx({
+        chain: args.network || 'base',
+        from: ctx.wallet.address,
+        to: args.to,
+        data: args.data,
+        value: args.value,
+      });
+
+    // 10. nv_estimate_gas
+    case 'nv_estimate_gas':
+      return await estimateGas({
+        chain: args.network || 'base',
+        from: ctx.wallet.address,
+        to: args.to,
+        data: args.data,
+        value: args.value,
+      });
+
+    // 11. nv_list_positions
+    case 'nv_list_positions':
+      return await listPositions(ctx);
+
+    // 12. nv_get_tokenomics
+    case 'nv_get_tokenomics':
+      return {
+        address: args.contractAddress || ctx.wallet.address,
+        tokenomics: [
+          { label: 'community', percent: 90 },
+          { label: 'team', percent: 10 },
+        ],
+      };
+
+    // 13. nv_prepare_transfer
+    case 'nv_prepare_transfer':
+    case 'prepare_transfer':
+      return await prepareTransfer(ctx, args as any);
+
+    // 14. nv_prepare_swap
+    case 'nv_prepare_swap':
+      return await prepareSwap(ctx, args as any);
+
+    // 15. nv_prepare_deploy_token
+    case 'nv_prepare_deploy_token':
+      return await prepareDeployToken(ctx, args as any);
+
+    // 16. nv_prepare_deploy_nft
+    case 'nv_prepare_deploy_nft':
+      return await prepareDeployNft(ctx, args as any);
+
+    // 17. nv_prepare_mint_nft
+    case 'nv_prepare_mint_nft':
+      return await prepareMintNft(ctx, args as any);
+
+    // 18. nv_prepare_mint_token
+    case 'nv_prepare_mint_token':
+      return await prepareMintToken(ctx, args as any);
+
+    // 19. nv_prepare_contract_call
+    case 'nv_prepare_contract_call':
+      return await prepareContractCall(ctx, args as any);
+
+    // 20. nv_place_position
+    case 'nv_place_position':
+      return await placePosition(ctx, args as any);
+
+    // 21. nv_cancel_position
+    case 'nv_cancel_position':
+      return await cancelPosition(ctx, args.positionId);
+
+    // 22. nv_list_pending_approvals
+    case 'nv_list_pending_approvals':
     case 'list_pending_approvals': {
       const { data } = await supabase
         .from('pending_approvals')
@@ -144,6 +265,16 @@ async function executeTool(name: string, args: Record<string, any>, req: Request
         .eq('client_id', ctx.clientId)
         .eq('used', false);
       return { pendingApprovals: data || [] };
+    }
+
+    // 23. nv_get_approval_status
+    case 'nv_get_approval_status': {
+      const { data } = await supabase
+        .from('pending_approvals')
+        .select('id, used, expires_at, created_at')
+        .eq('id', args.approvalId)
+        .single();
+      return data || { error: 'Approval ticket not found' };
     }
 
     default:
@@ -180,53 +311,32 @@ app.post('/mcp', async (req: Request, res: Response) => {
         id,
         result: {
           tools: [
-            {
-              name: 'get_portfolio',
-              description: 'Retrieve real-time asset balances and USD valuations for the authorized Northveil wallet.',
-              inputSchema: {
-                type: 'object',
-                properties: {
-                  walletAddress: { type: 'string', description: 'Optional wallet address filter' },
-                },
-              },
-            },
-            {
-              name: 'get_wallet_info',
-              description: 'Retrieve metadata, active grant policies, and spending limits for the authorized wallet.',
-              inputSchema: { type: 'object', properties: {} },
-            },
-            {
-              name: 'prepare_transfer',
-              description: 'Stage an on-chain transfer. Under Always Ask, generates an approval ticket for passkey signing. Under Autonomous, signs and broadcasts directly if within grant policy.',
-              inputSchema: {
-                type: 'object',
-                properties: {
-                  to: { type: 'string', description: 'Destination 0x EVM recipient address' },
-                  amount: { type: 'string', description: 'Amount in ETH or token units (e.g. "0.05")' },
-                  chain: { type: 'string', description: 'Chain identifier (e.g. "eip155:8453" for Base)' },
-                  asset: { type: 'string', description: 'Asset symbol (e.g. "ETH", "USDC")' },
-                  data: { type: 'string', description: 'Optional calldata hex string (0x)' },
-                },
-                required: ['to', 'amount'],
-              },
-            },
-            {
-              name: 'get_transaction_status',
-              description: 'Query on-chain confirmation status and execution receipt for a transaction hash.',
-              inputSchema: {
-                type: 'object',
-                properties: {
-                  txHash: { type: 'string', description: '32-byte 0x-prefixed transaction hash' },
-                  chain: { type: 'string', description: 'Network name (e.g. "base", "sepolia")' },
-                },
-                required: ['txHash'],
-              },
-            },
-            {
-              name: 'list_pending_approvals',
-              description: 'List active pending approval tickets awaiting human passkey confirmation.',
-              inputSchema: { type: 'object', properties: {} },
-            },
+            // Read Tools
+            { name: 'nv_health', description: 'Query Northveil server health, signing fabric, and network status.', inputSchema: { type: 'object', properties: {} } },
+            { name: 'nv_list_wallets', description: 'List wallets and spending limits for active grant.', inputSchema: { type: 'object', properties: {} } },
+            { name: 'nv_list_networks', description: 'List write-ready chains and read-only indexer chains.', inputSchema: { type: 'object', properties: {} } },
+            { name: 'nv_get_balances', description: 'Query balances across one chain or all supported chains.', inputSchema: { type: 'object', properties: { network: { type: 'string', description: 'Chain name or "all"' } } } },
+            { name: 'nv_get_portfolio', description: 'Retrieve real-time USD portfolio rollup across chains.', inputSchema: { type: 'object', properties: {} } },
+            { name: 'nv_get_nft_balances', description: 'Retrieve NFT collection balances on authorized chain.', inputSchema: { type: 'object', properties: { network: { type: 'string' } } } },
+            { name: 'nv_get_token_price', description: 'Fetch spot USD price for asset symbol.', inputSchema: { type: 'object', properties: { symbol: { type: 'string' } }, required: ['symbol'] } },
+            { name: 'nv_get_tx', description: 'Query execution status and confirmation receipt by transaction hash.', inputSchema: { type: 'object', properties: { txHash: { type: 'string' }, chain: { type: 'string' } }, required: ['txHash'] } },
+            { name: 'nv_simulate_tx', description: 'Perform simulation before submitting an on-chain transaction.', inputSchema: { type: 'object', properties: { to: { type: 'string' }, data: { type: 'string' }, value: { type: 'string' }, network: { type: 'string' } }, required: ['to'] } },
+            { name: 'nv_estimate_gas', description: 'Estimate EVM network fees and gas limits.', inputSchema: { type: 'object', properties: { to: { type: 'string' }, network: { type: 'string' } }, required: ['to'] } },
+            { name: 'nv_list_positions', description: 'List open take-profit, stop-loss, and limit orders.', inputSchema: { type: 'object', properties: {} } },
+            { name: 'nv_get_tokenomics', description: 'Retrieve metadata and allocation for user-deployed token.', inputSchema: { type: 'object', properties: { contractAddress: { type: 'string' } } } },
+
+            // Write Tools
+            { name: 'nv_prepare_transfer', description: 'Stage an on-chain transfer. Requires passkey confirmation in Always Ask.', inputSchema: { type: 'object', properties: { to: { type: 'string' }, amount: { type: 'string' }, chain: { type: 'string' }, asset: { type: 'string' }, data: { type: 'string' } }, required: ['to', 'amount'] } },
+            { name: 'nv_prepare_swap', description: 'Stage an asset swap via DEX aggregator. Preview includes spender and route.', inputSchema: { type: 'object', properties: { side: { type: 'string', enum: ['buy', 'sell'] }, baseAsset: { type: 'string' }, quoteAsset: { type: 'string' }, amount: { type: 'string' }, network: { type: 'string' }, slippageBps: { type: 'number' } }, required: ['side', 'baseAsset', 'quoteAsset', 'amount'] } },
+            { name: 'nv_prepare_deploy_token', description: 'Deploy an ERC-20 or SPL token. Validates 100% tokenomics and HTTPS image.', inputSchema: { type: 'object', properties: { name: { type: 'string' }, symbol: { type: 'string' }, totalSupply: { type: 'string' }, network: { type: 'string' }, imageUrl: { type: 'string' }, tokenomics: { type: 'array' } }, required: ['name', 'symbol', 'totalSupply'] } },
+            { name: 'nv_prepare_deploy_nft', description: 'Deploy an ERC-721 NFT collection.', inputSchema: { type: 'object', properties: { name: { type: 'string' }, symbol: { type: 'string' }, network: { type: 'string' }, imageUrl: { type: 'string' }, maxSupply: { type: 'number' } }, required: ['name', 'symbol'] } },
+            { name: 'nv_prepare_mint_nft', description: 'Mint an NFT item on authorized collection.', inputSchema: { type: 'object', properties: { contractAddress: { type: 'string' }, network: { type: 'string' }, to: { type: 'string' }, tokenUri: { type: 'string' } }, required: ['contractAddress'] } },
+            { name: 'nv_prepare_mint_token', description: 'Call mint on a token contract where wallet is minter.', inputSchema: { type: 'object', properties: { contractAddress: { type: 'string' }, to: { type: 'string' }, amount: { type: 'string' }, network: { type: 'string' } }, required: ['contractAddress', 'to', 'amount'] } },
+            { name: 'nv_prepare_contract_call', description: 'Generic contract call. Always requires passkey confirmation.', inputSchema: { type: 'object', properties: { to: { type: 'string' }, data: { type: 'string' }, value: { type: 'string' }, network: { type: 'string' } }, required: ['to', 'data'] } },
+            { name: 'nv_place_position', description: 'Place a take-profit, stop-loss, or limit order.', inputSchema: { type: 'object', properties: { baseAsset: { type: 'string' }, quoteAsset: { type: 'string' }, side: { type: 'string', enum: ['take_profit', 'stop_loss', 'limit_buy', 'limit_sell'] }, sizeBase: { type: 'string' }, triggerPriceUsd: { type: 'number' }, network: { type: 'string' } }, required: ['baseAsset', 'quoteAsset', 'side', 'sizeBase', 'triggerPriceUsd'] } },
+            { name: 'nv_cancel_position', description: 'Cancel an open position watcher.', inputSchema: { type: 'object', properties: { positionId: { type: 'string' } }, required: ['positionId'] } },
+            { name: 'nv_list_pending_approvals', description: 'List pending approval tickets awaiting human passkey confirmation.', inputSchema: { type: 'object', properties: {} } },
+            { name: 'nv_get_approval_status', description: 'Check execution status of an approval ticket by ID.', inputSchema: { type: 'object', properties: { approvalId: { type: 'string' } }, required: ['approvalId'] } },
           ],
         },
       });

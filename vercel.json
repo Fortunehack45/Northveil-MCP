@@ -4,13 +4,9 @@
     "api/index.ts": {
       "maxDuration": 60,
       "memory": 1024
-    },
-    "index.ts": {
-      "maxDuration": 60,
-      "memory": 1024
     }
   },
-  "routes": [
-    { "src": "/(.*)", "dest": "/api/index.ts" }
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/api" }
   ]
 }

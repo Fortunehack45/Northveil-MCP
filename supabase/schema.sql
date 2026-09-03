@@ -108,3 +108,32 @@ create index if not exists idx_wallets_user on public.wallets (user_id);
 create index if not exists idx_pending_approvals_user_used on public.pending_approvals (user_id, used);
 create index if not exists idx_grants_client on public.grants (client_id);
 create index if not exists idx_audit_logs_user on public.audit_logs (user_id);
+
+-- 9. Positions (Take-Profit, Stop-Loss, and Limit Orders - Section 23)
+create table if not exists public.positions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.users(id) on delete cascade,
+  client_id uuid not null references public.agent_clients(id),
+  wallet_id uuid not null references public.wallets(id),
+  network text not null,
+  base_asset text not null,
+  quote_asset text not null,
+  side text not null,              -- take_profit | stop_loss | limit_buy | limit_sell
+  size_base text,
+  trigger_price_usd numeric,
+  limit_price_usd numeric,
+  slippage_bps int not null default 50,
+  status text not null default 'open', -- open | triggered | executed | cancelled | failed
+  last_error text,
+  created_at timestamptz default now()
+);
+
+create index if not exists idx_positions_user_status on public.positions (user_id, status);
+
+-- 10. Extended Grant Permission Flags (Section 24)
+alter table public.grants add column if not exists allow_swaps boolean default false;
+alter table public.grants add column if not exists allow_deploys boolean default false;
+alter table public.grants add column if not exists allow_mints boolean default false;
+alter table public.grants add column if not exists allow_positions boolean default false;
+alter table public.grants add column if not exists allow_deploys_autonomous boolean default false;
+alter table public.grants add column if not exists max_usd_per_tx numeric;
