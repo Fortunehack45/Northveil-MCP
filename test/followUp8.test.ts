@@ -53,23 +53,25 @@ async function main() {
     assert.deepStrictEqual(regData.redirect_uris, ['http://127.0.0.1:8000/callback']);
     console.log('   ✓ Dynamic client registration verified');
 
-    // 4. GET /sse and POST /mcp unauthenticated -> 401 with WWW-Authenticate
-    console.log('4. Testing unauthenticated /sse and /mcp -> 401 + WWW-Authenticate header...');
+    // 4. POST /mcp tools/call unauthenticated -> 401 with WWW-Authenticate; tools/list -> 200 public
+    console.log('4. Testing unauthenticated /mcp tools/call -> 401 + WWW-Authenticate header and tools/list -> 200...');
     const resMcp401 = await fetch(`${baseUrl}/mcp`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'nv_prepare_transfer', arguments: {} } }),
     });
-    assert.strictEqual(resMcp401.status, 401, 'Unauthenticated /mcp must return 401');
+    assert.strictEqual(resMcp401.status, 401, 'Unauthenticated /mcp tools/call must return 401');
     const wwwAuthMcp = resMcp401.headers.get('www-authenticate');
     assert(wwwAuthMcp && wwwAuthMcp.includes('Bearer realm="Northveil"'), 'Must include Bearer realm="Northveil"');
     assert(wwwAuthMcp.includes('resource_metadata="https://mcp.northveil.xyz/.well-known/oauth-protected-resource"'), 'Must include resource_metadata');
 
-    const resSse401 = await fetch(`${baseUrl}/sse`);
-    assert.strictEqual(resSse401.status, 401, 'Unauthenticated /sse must return 401');
-    const wwwAuthSse = resSse401.headers.get('www-authenticate');
-    assert(wwwAuthSse && wwwAuthSse.includes('Bearer realm="Northveil"'), 'Must include Bearer realm="Northveil"');
-    console.log('   ✓ 401 + WWW-Authenticate challenges verified on both endpoints');
+    const resMcpList = await fetch(`${baseUrl}/mcp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }),
+    });
+    assert.strictEqual(resMcpList.status, 200, 'Public tools/list must return 200');
+    console.log('   ✓ 401 + WWW-Authenticate challenge verified on tools/call, public catalog on tools/list');
 
     // 5. Dynamic client PKCE flow
     console.log('5. Testing Dynamic Client PKCE flow...');

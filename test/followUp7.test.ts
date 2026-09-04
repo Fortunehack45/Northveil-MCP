@@ -31,18 +31,19 @@ async function main() {
   const baseUrl = `http://127.0.0.1:${port}`;
 
   try {
-    // 1. no token on /mcp → 401 + WWW-Authenticate
-    console.log('1. Testing no token on /mcp -> 401 + WWW-Authenticate...');
+    // 1. no token on /mcp tools/call → 401 + WWW-Authenticate
+    console.log('1. Testing no token on /mcp tools/call -> 401 + WWW-Authenticate...');
     const resNoAuth = await fetch(`${baseUrl}/mcp`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         jsonrpc: '2.0',
         id: 1,
-        method: 'tools/list',
+        method: 'tools/call',
+        params: { name: 'nv_prepare_transfer', arguments: {} },
       }),
     });
-    assert.strictEqual(resNoAuth.status, 401, 'Unauthenticated /mcp must return HTTP 401');
+    assert.strictEqual(resNoAuth.status, 401, 'Unauthenticated /mcp tools/call must return HTTP 401');
     const wwwAuth = resNoAuth.headers.get('www-authenticate');
     assert(wwwAuth && wwwAuth.includes('Bearer realm="Northveil"'), 'Must include WWW-Authenticate header with Bearer realm');
     console.log('   ✓ 401 + WWW-Authenticate verified');
