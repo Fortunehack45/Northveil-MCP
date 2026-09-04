@@ -97,6 +97,185 @@ function turnkeyProvider(): MpcProvider {
       return { mpcWalletId, address };
     },
 
+    async importWallet(userId: string, input: { mnemonic?: string; privateKey?: string }) {
+      if (!input.mnemonic && !input.privateKey) {
+        throw new Error('IMPORT_MATERIAL_REQUIRED: Either mnemonic or privateKey must be provided');
+      }
+
+      const { TurnkeyClient } = await import('@turnkey/http');
+      const { ApiKeyStamper } = await import('@turnkey/api-key-stamper');
+      const { encryptWalletToBundle, encryptPrivateKeyToBundle } = await import('@turnkey/crypto');
+
+      const stamper = new ApiKeyStamper({
+        apiPublicKey: process.env.TURNKEY_API_PUBLIC_KEY!,
+        apiPrivateKey: process.env.TURNKEY_API_PRIVATE_KEY!,
+      });
+
+      const client = new TurnkeyClient(
+        { baseUrl: process.env.TURNKEY_BASE_URL || 'https://api.turnkey.com' },
+        stamper
+      );
+
+      const organizationId = process.env.TURNKEY_ORGANIZATION_ID!;
+      const whoami = await client.getWhoami({ organizationId });
+      const turnkeyUserId = whoami.userId;
+
+      let address = '';
+      let mpcWalletId = '';
+
+      if (input.mnemonic) {
+        const cleanMnemonic = input.mnemonic.trim();
+        let derivedAddress = '';
+        try {
+          derivedAddress = ethers.HDNodeWallet.fromPhrase(cleanMnemonic).address.toLowerCase();
+        } catch {}
+
+        try {
+          const initResp = await client.initImportWallet({
+            type: 'ACTIVITY_TYPE_INIT_IMPORT_WALLET',
+            organizationId,
+            parameters: {
+              userId: turnkeyUserId,
+            },
+            timestampMs: String(Date.now()),
+          });
+
+          const pollInit = await client.getActivity({
+            organizationId,
+            activityId: initResp.activity.id,
+          });
+
+          const importBundle = (pollInit.activity.result as any)?.initImportWalletResult?.importBundle;
+          if (!importBundle) {
+            throw new Error('Failed to initialize enclave wallet import bundle');
+          }
+
+          const encryptedBundle = await encryptWalletToBundle({
+            mnemonic: cleanMnemonic,
+            importBundle,
+            userId: turnkeyUserId,
+            organizationId,
+          });
+
+          const importResp = await client.importWallet({
+            type: 'ACTIVITY_TYPE_IMPORT_WALLET',
+            organizationId,
+            parameters: {
+              userId: turnkeyUserId,
+              walletName: `Northveil Vault Imported ${userId} ${Date.now()}`,
+              encryptedBundle,
+              accounts: [
+                {
+                  curve: 'CURVE_SECP256K1',
+                  pathFormat: 'PATH_FORMAT_BIP32',
+                  path: "m/44'/60'/0'/0/0",
+                  addressFormat: 'ADDRESS_FORMAT_ETHEREUM',
+                },
+              ],
+            },
+            timestampMs: String(Date.now()),
+          });
+
+          const pollImport = await client.getActivity({
+            organizationId,
+            activityId: importResp.activity.id,
+          });
+
+          const result = (pollImport.activity.result as any)?.importWalletResult;
+          address = (result?.addresses?.[0] || derivedAddress).toLowerCase();
+          mpcWalletId = result?.walletId || '';
+        } catch (err: any) {
+          if (err.message && err.message.includes('already imported')) {
+            const match = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(err.message);
+            if (match && derivedAddress) {
+              mpcWalletId = match[1];
+              address = derivedAddress;
+            } else {
+              throw err;
+            }
+          } else {
+            throw err;
+          }
+        }
+      } else if (input.privateKey) {
+        const cleanKey = input.privateKey.trim().replace(/^0x/, '');
+        let derivedAddress = '';
+        try {
+          derivedAddress = new ethers.Wallet('0x' + cleanKey).address.toLowerCase();
+        } catch {}
+
+        try {
+          const initResp = await client.initImportPrivateKey({
+            type: 'ACTIVITY_TYPE_INIT_IMPORT_PRIVATE_KEY',
+            organizationId,
+            parameters: {
+              userId: turnkeyUserId,
+            },
+            timestampMs: String(Date.now()),
+          });
+
+          const pollInit = await client.getActivity({
+            organizationId,
+            activityId: initResp.activity.id,
+          });
+
+          const importBundle = (pollInit.activity.result as any)?.initImportPrivateKeyResult?.importBundle;
+          if (!importBundle) {
+            throw new Error('Failed to initialize enclave private key import bundle');
+          }
+
+          const encryptedBundle = await encryptPrivateKeyToBundle({
+            privateKey: cleanKey,
+            keyFormat: 'HEXADECIMAL',
+            importBundle,
+            userId: turnkeyUserId,
+            organizationId,
+          });
+
+          const importResp = await client.importPrivateKey({
+            type: 'ACTIVITY_TYPE_IMPORT_PRIVATE_KEY',
+            organizationId,
+            parameters: {
+              userId: turnkeyUserId,
+              privateKeyName: `Northveil Vault Imported Key ${userId} ${Date.now()}`,
+              encryptedBundle,
+              curve: 'CURVE_SECP256K1',
+              addressFormats: ['ADDRESS_FORMAT_ETHEREUM'],
+            },
+            timestampMs: String(Date.now()),
+          });
+
+          const pollImport = await client.getActivity({
+            organizationId,
+            activityId: importResp.activity.id,
+          });
+
+          const result = (pollImport.activity.result as any)?.importPrivateKeyResult;
+          const addrObj = result?.addresses?.[0];
+          address = (typeof addrObj === 'string' ? addrObj : addrObj?.address || derivedAddress).toLowerCase();
+          mpcWalletId = result?.privateKeyId || '';
+        } catch (err: any) {
+          if (err.message && err.message.includes('already imported')) {
+            const match = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(err.message);
+            if (match && derivedAddress) {
+              mpcWalletId = match[1];
+              address = derivedAddress;
+            } else {
+              throw err;
+            }
+          } else {
+            throw err;
+          }
+        }
+      }
+
+      if (!address || !mpcWalletId) {
+        throw new Error('Turnkey enclave import failed to return valid wallet address');
+      }
+
+      return { mpcWalletId, address };
+    },
+
     async signAndBroadcast(req: SignRequest): Promise<SignResult> {
       const { TurnkeyClient } = await import('@turnkey/http');
       const { ApiKeyStamper } = await import('@turnkey/api-key-stamper');

@@ -1799,7 +1799,7 @@ app.post('/wallet/import', requireSession, async (req: Request, res: Response) =
       process.env.TURNKEY_ORGANIZATION_ID
     );
 
-    if (!isTurnkeyImportConfigured) {
+    if (!isTurnkeyImportConfigured && process.env.NODE_ENV === 'production') {
       return res.status(501).json({
         error: 'IMPORT_NOT_CONFIGURED',
         message: 'Turnkey enclave import is not configured on this control plane.',
@@ -1816,11 +1816,48 @@ app.post('/wallet/import', requireSession, async (req: Request, res: Response) =
 
     const imported = await (mpc as any).importWallet(userId, { mnemonic, privateKey });
 
+    // Check if wallet is already imported
+    const { data: existingWallet } = await supabase
+      .from('wallets')
+      .select('*')
+      .eq('address', imported.address.toLowerCase())
+      .maybeSingle();
+
+    if (existingWallet) {
+      if (existingWallet.user_id !== userId) {
+        await supabase
+          .from('wallets')
+          .update({ user_id: userId, name: name || existingWallet.name || 'Imported Vault' })
+          .eq('id', existingWallet.id);
+      }
+      return res.status(201).json({
+        address: existingWallet.address,
+        mpcWalletId: existingWallet.mpc_wallet_id,
+        wallet: {
+          id: existingWallet.id,
+          name: existingWallet.name || name || 'Imported Vault',
+          address: existingWallet.address,
+          chainFamily: existingWallet.chain_family,
+          mpcWalletId: existingWallet.mpc_wallet_id,
+          status: existingWallet.status,
+          isPrimary: existingWallet.is_primary,
+        },
+      });
+    }
+
+    // Determine if this should be the primary wallet (if user has 0 wallets)
+    const { count } = await supabase
+      .from('wallets')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId);
+    const isPrimary = (count === 0);
+
     const { data: inserted, error } = await supabase
       .from('wallets')
       .insert({
         user_id: userId,
         name: name || 'Imported Vault',
+        is_primary: isPrimary,
         address: imported.address.toLowerCase(),
         chain_family: 'evm',
         mpc_provider: 'turnkey',
@@ -1859,10 +1896,12 @@ app.post('/wallet/import', requireSession, async (req: Request, res: Response) =
       mpcWalletId: inserted.mpc_wallet_id,
       wallet: {
         id: inserted.id,
+        name: inserted.name,
         address: inserted.address,
         chainFamily: inserted.chain_family,
         mpcWalletId: inserted.mpc_wallet_id,
         status: inserted.status,
+        isPrimary: inserted.is_primary,
       },
     });
   } catch (err: any) {
@@ -1892,16 +1931,18 @@ app.get('/wallet/me', requireSession, async (req: Request, res: Response) => {
 
     const { data: wallets } = await supabase
       .from('wallets')
-      .select('id, address, chain_family, mpc_provider, mpc_wallet_id, status, created_at')
+      .select('id, name, is_primary, address, chain_family, mpc_provider, mpc_wallet_id, status, created_at')
       .eq('user_id', userId)
-      .eq('status', 'active');
+      .eq('status', 'active')
+      .order('is_primary', { ascending: false })
+      .order('created_at', { ascending: true });
 
     const next = await nextStep(userId);
 
     return res.json({
       authenticated: true,
       user: req.session!.user,
-      wallet: req.session!.wallet || (wallets && wallets[0]) || null,
+      wallet: req.session!.wallet || (wallets && wallets.find((w: any) => w.is_primary)) || (wallets && wallets[0]) || null,
       wallets: wallets || [],
       passkeys: passkeys || [],
       agents: agents || [],

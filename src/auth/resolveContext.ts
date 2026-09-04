@@ -288,7 +288,7 @@ export async function resolveContext(
 }
 
 export async function loadScope(userId: string, clientId: string | null): Promise<ToolContext> {
-  // 1. Resolve active wallet for user
+  // 1. Resolve active wallet for user (handling multiple wallets gracefully)
   let walletRecord: any = null;
   try {
     const { data } = await supabase
@@ -296,8 +296,11 @@ export async function loadScope(userId: string, clientId: string | null): Promis
       .select('*')
       .eq('user_id', userId)
       .eq('status', 'active')
-      .maybeSingle();
-    if (data) walletRecord = data;
+      .order('is_primary', { ascending: false })
+      .order('created_at', { ascending: true });
+    if (data && data.length > 0) {
+      walletRecord = data.find((w: any) => w.is_primary) || data[0];
+    }
   } catch {}
 
   if (!walletRecord && process.env.NODE_ENV !== 'production') {
