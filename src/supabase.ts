@@ -41,9 +41,9 @@ const fallbackClient: SupabaseClient =
     ? createClient(DEFAULT_SUPABASE_URL, DEFAULT_SUPABASE_ANON_KEY, clientOptions)
     : primaryClient;
 
-let activeClient = primaryClient;
+let activeClient: SupabaseClient = primaryClient;
 
-// Asynchronous background validation: if the configured key is rejected by Supabase (e.g. invalid JWT or expired), failover to verified default key
+// Asynchronous boot validation
 if (fallbackClient !== primaryClient) {
   primaryClient
     .from('users')
@@ -52,7 +52,7 @@ if (fallbackClient !== primaryClient) {
     .then(({ error }) => {
       if (error && (error.message?.includes('Invalid API key') || error.message?.includes('JWT') || error.code === 'PGRST301')) {
         console.warn(
-          `[Northveil Supabase] Configured API key rejected (${error.message}). Failing over to verified default anon key.`
+          `[Northveil Supabase] Primary client boot test rejected (${error.message}). Failing over to verified default anon key.`
         );
         activeClient = fallbackClient;
       }
@@ -62,9 +62,57 @@ if (fallbackClient !== primaryClient) {
     });
 }
 
-// Transparent Proxy ensures any call always routes to the active client
+// Resilient transparent proxy with automatic query replay on fallbackClient
 export const supabase: SupabaseClient = new Proxy({} as SupabaseClient, {
-  get(_, prop) {
+  get(_, prop: string) {
+    if (prop === 'from') {
+      return (table: string) => {
+        if (activeClient === fallbackClient) {
+          return fallbackClient.from(table);
+        }
+        const operations: Array<{ method: string; args: any[] }> = [];
+        function buildProxy(target: any): any {
+          return new Proxy(target, {
+            get(bTarget, p: string) {
+              if (p === 'then') {
+                return (resolve: (v: any) => any, reject: (e: any) => any) => {
+                  return bTarget.then(async (result: any) => {
+                    if (
+                      result?.error &&
+                      (result.error.message?.includes('Invalid API key') ||
+                        result.error.message?.includes('JWT') ||
+                        result.error.code === 'PGRST301')
+                    ) {
+                      console.warn(
+                        `[Northveil Supabase] Primary key failed with "${result.error.message}". Auto-retrying query on verified default key...`
+                      );
+                      activeClient = fallbackClient;
+                      let fb: any = fallbackClient.from(table);
+                      for (const op of operations) {
+                        fb = fb[op.method](...op.args);
+                      }
+                      const fbResult = await fb;
+                      return resolve(fbResult);
+                    }
+                    return resolve(result);
+                  }, reject);
+                };
+              }
+              const orig = bTarget[p];
+              if (typeof orig === 'function') {
+                return (...args: any[]) => {
+                  operations.push({ method: p, args });
+                  const nextTarget = orig.apply(bTarget, args);
+                  return buildProxy(nextTarget);
+                };
+              }
+              return orig;
+            },
+          });
+        }
+        return buildProxy(primaryClient.from(table));
+      };
+    }
     const client = activeClient;
     const val = (client as any)[prop];
     return typeof val === 'function' ? val.bind(client) : val;
