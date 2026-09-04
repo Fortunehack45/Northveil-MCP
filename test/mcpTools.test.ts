@@ -35,7 +35,7 @@ async function runTests() {
       chain: 'eip155:8453',
     });
 
-    assert.strictEqual(result.status, 'APPROVAL_REQUIRED');
+    assert.strictEqual(result.status, 'pending_approval');
     assert.ok(result.approvalId);
     assert.ok(result.payloadHash);
     assert.ok(result.approveUrl);
@@ -57,7 +57,7 @@ async function runTests() {
       to: 'invalid-address',
       amount: '0.05',
     });
-    assert.strictEqual(badRecipientResult.status, 'DENIED');
+    assert.strictEqual(badRecipientResult.status, 'denied');
     console.log('✓ rejects invalid recipient address format');
   }
 
@@ -74,7 +74,7 @@ async function runTests() {
       to: '0x2222222222222222222222222222222222222222',
       amount: '0.05', // 0.05 > 0.01 ETH
     });
-    assert.strictEqual(deniedResult.status, 'DENIED');
+    assert.strictEqual(deniedResult.status, 'denied');
     assert.strictEqual(deniedResult.reason, 'over_daily_limit');
     console.log('✓ denies intent exceeding daily limit');
   }

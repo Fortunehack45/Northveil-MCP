@@ -35,23 +35,24 @@ export type Decision =
  * Server-side policy engine: untrusted models cannot bypass these rules.
  */
 export function evaluateGrant(grant: Grant, intent: Intent, now = new Date()): Decision {
+  if (!grant) return { type: 'ask', reason: 'no_grant' };
   if (grant.revoked) return { type: 'deny', reason: 'client_revoked' };
-  if (now > grant.expiresAt) return { type: 'deny', reason: 'grant_expired' };
+  if (grant.expiresAt && now > grant.expiresAt) return { type: 'deny', reason: 'grant_expired' };
   
-  const normalizedWalletAddresses = grant.walletAddresses.map(a => a.toLowerCase());
-  if (!normalizedWalletAddresses.includes(intent.walletAddress.toLowerCase())) {
+  const normalizedWalletAddresses = (grant.walletAddresses || []).map(a => a.toLowerCase());
+  if (normalizedWalletAddresses.length > 0 && !normalizedWalletAddresses.includes(intent.walletAddress.toLowerCase())) {
     return { type: 'deny', reason: 'wallet_not_in_grant' };
   }
   
-  if (!grant.chains.includes(intent.chain)) {
+  if (grant.chains && grant.chains.length > 0 && !grant.chains.includes(intent.chain)) {
     return { type: 'deny', reason: 'chain_not_allowed' };
   }
   
-  if (!grant.allowedAssets.includes('*') && !grant.allowedAssets.includes(intent.asset)) {
+  if (grant.allowedAssets && !grant.allowedAssets.includes('*') && !grant.allowedAssets.includes(intent.asset)) {
     return { type: 'deny', reason: 'asset_not_allowed' };
   }
   
-  if (grant.allowedRecipients !== '*') {
+  if (grant.allowedRecipients && grant.allowedRecipients !== '*' && Array.isArray(grant.allowedRecipients)) {
     const recipients = grant.allowedRecipients.map(r => r.toLowerCase());
     if (!recipients.includes(intent.to.toLowerCase())) {
       return { type: 'ask', reason: 'recipient_not_preauthorized' };

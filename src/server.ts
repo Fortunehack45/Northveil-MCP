@@ -5,9 +5,10 @@ import { resolveContext, HttpError, hashToken } from './auth/resolveContext.js';
 import { prepareTransfer } from './tools/prepareTransfer.js';
 import { getPortfolio } from './tools/getPortfolio.js';
 import { getTransactionStatus } from './tools/getTransactionStatus.js';
-import { consumeApproval, getApproval } from './wallet/approvals.js';
+import { consumeApproval, getApproval, getApprovalAsync } from './wallet/approvals.js';
 import { verifyPasskeyForPayload } from './auth/passkey.js';
 import { getMpcProvider } from './wallet/mpcAdapter.js';
+import { submitIntent, getRequest, loadRequest, updateRequest, insertSignPermit } from './wallet/requestLifecycle.js';
 import { setAutonomousMode } from './tools/setAutonomousMode.js';
 import { issueClientKey } from './auth/agentClient.js';
 import { supabase } from './supabase.js';
@@ -659,34 +660,39 @@ async function executeTool(name: string, args: Record<string, any>, req: Request
         ],
       };
 
+    // 12.5. nv_get_request
+    case 'nv_get_request':
+    case 'get_request':
+      return await getRequest(args.requestId || args.id);
+
     // 13. nv_prepare_transfer
     case 'nv_prepare_transfer':
     case 'prepare_transfer':
-      return await prepareTransfer(ctx, args as any);
+      return await submitIntent(ctx, 'nv_prepare_transfer', args as any);
 
     // 14. nv_prepare_swap
     case 'nv_prepare_swap':
-      return await prepareSwap(ctx, args as any);
+      return await submitIntent(ctx, 'nv_prepare_swap', args as any);
 
     // 15. nv_prepare_deploy_token
     case 'nv_prepare_deploy_token':
-      return await prepareDeployToken(ctx, args as any);
+      return await submitIntent(ctx, 'nv_prepare_deploy_token', args as any);
 
     // 16. nv_prepare_deploy_nft
     case 'nv_prepare_deploy_nft':
-      return await prepareDeployNft(ctx, args as any);
+      return await submitIntent(ctx, 'nv_prepare_deploy_nft', args as any);
 
     // 17. nv_prepare_mint_nft
     case 'nv_prepare_mint_nft':
-      return await prepareMintNft(ctx, args as any);
+      return await submitIntent(ctx, 'nv_prepare_mint_nft', args as any);
 
     // 18. nv_prepare_mint_token
     case 'nv_prepare_mint_token':
-      return await prepareMintToken(ctx, args as any);
+      return await submitIntent(ctx, 'nv_prepare_mint_token', args as any);
 
     // 19. nv_prepare_contract_call
     case 'nv_prepare_contract_call':
-      return await prepareContractCall(ctx, args as any);
+      return await submitIntent(ctx, 'nv_prepare_contract_call', args as any);
 
     // 20. nv_place_position
     case 'nv_place_position':
@@ -737,6 +743,7 @@ export function toolCatalog() {
     { name: 'nv_get_nft_balances', description: 'Retrieve NFT collection balances on authorized chain.', inputSchema: { type: 'object', properties: { network: { type: 'string' } } } },
     { name: 'nv_get_token_price', description: 'Fetch spot USD price for asset symbol.', inputSchema: { type: 'object', properties: { symbol: { type: 'string' } }, required: ['symbol'] } },
     { name: 'nv_get_tx', description: 'Query execution status and confirmation receipt by transaction hash.', inputSchema: { type: 'object', properties: { txHash: { type: 'string' }, chain: { type: 'string' } }, required: ['txHash'] } },
+    { name: 'nv_get_request', description: 'Query lifecycle status of an agent spend or transaction request by ID (pending_approval, pending_signature, pending_confirmation, success, denied, error).', inputSchema: { type: 'object', properties: { requestId: { type: 'string', description: 'Agent request ID' } }, required: ['requestId'] } },
     { name: 'nv_simulate_tx', description: 'Perform simulation before submitting an on-chain transaction.', inputSchema: { type: 'object', properties: { to: { type: 'string' }, data: { type: 'string' }, value: { type: 'string' }, network: { type: 'string' } }, required: ['to'] } },
     { name: 'nv_estimate_gas', description: 'Estimate EVM network fees and gas limits.', inputSchema: { type: 'object', properties: { to: { type: 'string' }, network: { type: 'string' } }, required: ['to'] } },
     { name: 'nv_list_positions', description: 'List open take-profit, stop-loss, and limit orders.', inputSchema: { type: 'object', properties: {} } },
@@ -745,7 +752,7 @@ export function toolCatalog() {
     // Write Tools
     {
       name: 'nv_prepare_transfer',
-      description: 'Stage an on-chain transfer. Requires passkey confirmation in Always Ask.',
+      description: 'Stage an on-chain transfer. Submits spend intent once and returns requestId. Agent polls nv_get_request until terminal status. Requires passkey confirmation in Always Ask.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -759,12 +766,12 @@ export function toolCatalog() {
         required: ['to', 'amount'],
       },
     },
-    { name: 'nv_prepare_swap', description: 'Stage an asset swap via DEX aggregator. Preview includes spender and route.', inputSchema: { type: 'object', properties: { side: { type: 'string', enum: ['buy', 'sell'] }, baseAsset: { type: 'string' }, quoteAsset: { type: 'string' }, amount: { type: 'string' }, network: { type: 'string' }, slippageBps: { type: 'number' } }, required: ['side', 'baseAsset', 'quoteAsset', 'amount'] } },
-    { name: 'nv_prepare_deploy_token', description: 'Deploy an ERC-20 or SPL token. Validates 100% tokenomics and HTTPS image.', inputSchema: { type: 'object', properties: { name: { type: 'string' }, symbol: { type: 'string' }, totalSupply: { type: 'string' }, network: { type: 'string' }, imageUrl: { type: 'string' }, tokenomics: { type: 'array' } }, required: ['name', 'symbol', 'totalSupply'] } },
-    { name: 'nv_prepare_deploy_nft', description: 'Deploy an ERC-721 NFT collection.', inputSchema: { type: 'object', properties: { name: { type: 'string' }, symbol: { type: 'string' }, network: { type: 'string' }, imageUrl: { type: 'string' }, maxSupply: { type: 'number' } }, required: ['name', 'symbol'] } },
-    { name: 'nv_prepare_mint_nft', description: 'Mint an NFT item on authorized collection.', inputSchema: { type: 'object', properties: { contractAddress: { type: 'string' }, network: { type: 'string' }, to: { type: 'string' }, tokenUri: { type: 'string' } }, required: ['contractAddress'] } },
-    { name: 'nv_prepare_mint_token', description: 'Call mint on a token contract where wallet is minter.', inputSchema: { type: 'object', properties: { contractAddress: { type: 'string' }, to: { type: 'string' }, amount: { type: 'string' }, network: { type: 'string' } }, required: ['contractAddress', 'to', 'amount'] } },
-    { name: 'nv_prepare_contract_call', description: 'Generic contract call. Always requires passkey confirmation.', inputSchema: { type: 'object', properties: { to: { type: 'string' }, data: { type: 'string' }, value: { type: 'string' }, network: { type: 'string' } }, required: ['to', 'data'] } },
+    { name: 'nv_prepare_swap', description: 'Stage an asset swap via DEX aggregator. Submits spend intent once and returns requestId. Agent polls nv_get_request until terminal status.', inputSchema: { type: 'object', properties: { side: { type: 'string', enum: ['buy', 'sell'] }, baseAsset: { type: 'string' }, quoteAsset: { type: 'string' }, amount: { type: 'string' }, network: { type: 'string' }, slippageBps: { type: 'number' } }, required: ['side', 'baseAsset', 'quoteAsset', 'amount'] } },
+    { name: 'nv_prepare_deploy_token', description: 'Deploy an ERC-20 or SPL token. Submits spend intent once and returns requestId. Agent polls nv_get_request until terminal status.', inputSchema: { type: 'object', properties: { name: { type: 'string' }, symbol: { type: 'string' }, totalSupply: { type: 'string' }, network: { type: 'string' }, imageUrl: { type: 'string' }, tokenomics: { type: 'array' } }, required: ['name', 'symbol', 'totalSupply'] } },
+    { name: 'nv_prepare_deploy_nft', description: 'Deploy an ERC-721 NFT collection. Submits spend intent once and returns requestId. Agent polls nv_get_request until terminal status.', inputSchema: { type: 'object', properties: { name: { type: 'string' }, symbol: { type: 'string' }, network: { type: 'string' }, imageUrl: { type: 'string' }, maxSupply: { type: 'number' } }, required: ['name', 'symbol'] } },
+    { name: 'nv_prepare_mint_nft', description: 'Mint an NFT item on authorized collection. Submits spend intent once and returns requestId. Agent polls nv_get_request until terminal status.', inputSchema: { type: 'object', properties: { contractAddress: { type: 'string' }, network: { type: 'string' }, to: { type: 'string' }, tokenUri: { type: 'string' } }, required: ['contractAddress'] } },
+    { name: 'nv_prepare_mint_token', description: 'Call mint on a token contract where wallet is minter. Submits spend intent once and returns requestId. Agent polls nv_get_request until terminal status.', inputSchema: { type: 'object', properties: { contractAddress: { type: 'string' }, to: { type: 'string' }, amount: { type: 'string' }, network: { type: 'string' } }, required: ['contractAddress', 'to', 'amount'] } },
+    { name: 'nv_prepare_contract_call', description: 'Generic contract call. Submits spend intent once and returns requestId. Agent polls nv_get_request until terminal status. Always requires passkey confirmation.', inputSchema: { type: 'object', properties: { to: { type: 'string' }, data: { type: 'string' }, value: { type: 'string' }, network: { type: 'string' } }, required: ['to', 'data'] } },
     { name: 'nv_place_position', description: 'Place a take-profit, stop-loss, or limit order.', inputSchema: { type: 'object', properties: { baseAsset: { type: 'string' }, quoteAsset: { type: 'string' }, side: { type: 'string', enum: ['take_profit', 'stop_loss', 'limit_buy', 'limit_sell'] }, sizeBase: { type: 'string' }, triggerPriceUsd: { type: 'number' }, network: { type: 'string' } }, required: ['baseAsset', 'quoteAsset', 'side', 'sizeBase', 'triggerPriceUsd'] } },
     { name: 'nv_cancel_position', description: 'Cancel an open position watcher.', inputSchema: { type: 'object', properties: { positionId: { type: 'string' } }, required: ['positionId'] } },
     { name: 'nv_list_pending_approvals', description: 'List pending approval tickets awaiting human passkey confirmation.', inputSchema: { type: 'object', properties: {} } },
@@ -1060,20 +1067,26 @@ app.post('/message', async (req: Request, res: Response) => {
 });
 
 // -------------------------------------------------------------
+// -------------------------------------------------------------
 // Passkey Approval Completion (POST /api/approvals/:id/complete)
 // -------------------------------------------------------------
-app.post('/api/approvals/:id/complete', async (req: Request, res: Response) => {
+async function handleApprovalCompletion(req: Request, res: Response) {
   const approvalId = req.params.id;
-  const { assertionResponse, credentialId } = req.body;
+  const { assertionResponse, credentialId, payloadHash } = req.body || {};
 
   try {
-    // 1. Fetch ticket
-    const ticket = getApproval(approvalId);
+    // 1. Fetch ticket (from memory, pending_approvals, or agent_requests)
+    const ticket = await getApprovalAsync(approvalId);
     if (!ticket) {
       return res.status(404).json({ error: 'UNKNOWN_APPROVAL' });
     }
 
-    // 2. Verify passkey WebAuthn challenge commits to payloadHash
+    // 2. Direct payloadHash check if provided in body
+    if (payloadHash && payloadHash !== ticket.payloadHash) {
+      return res.status(400).json({ error: 'PAYLOAD_MISMATCH' });
+    }
+
+    // 3. Verify passkey WebAuthn challenge commits to payloadHash
     if (assertionResponse) {
       if (assertionResponse.clientDataJSON) {
         try {
@@ -1090,11 +1103,11 @@ app.post('/api/approvals/:id/complete', async (req: Request, res: Response) => {
       }
     }
 
-    // 3. Consume ticket (enforces single use, expiry, payload hash)
+    // 4. Consume ticket (enforces single use, expiry, payload hash)
     await consumeApproval(approvalId, ticket.payloadHash);
 
-    // 4. In production, verify passkey WebAuthn assertion signature
-    if (process.env.NODE_ENV === 'production' && assertionResponse) {
+    // 5. In production, verify passkey WebAuthn assertion signature
+    if (process.env.NODE_ENV === 'production' && assertionResponse && credentialId && ticket.userId) {
       const { data: passkeyRecord } = await supabase
         .from('passkeys')
         .select('*')
@@ -1117,7 +1130,13 @@ app.post('/api/approvals/:id/complete', async (req: Request, res: Response) => {
       });
     }
 
-    // 5. Threshold sign exact canonical bytes with Turnkey MPC provider
+    // 6. Request lifecycle transitions: pending_approval -> pending_signature
+    await updateRequest(approvalId, { status: 'pending_signature' });
+
+    // 7. Insert single-use sign permit so assertSignPermit passes
+    await insertSignPermit(ticket.walletId || 'turnkey-wallet', ticket.payloadHash);
+
+    // 8. Threshold sign exact canonical bytes with Turnkey MPC provider
     const mpc = getMpcProvider();
     const signResult = await mpc.signAndBroadcast({
       mpcWalletId: ticket.walletId || 'turnkey-wallet',
@@ -1126,8 +1145,14 @@ app.post('/api/approvals/:id/complete', async (req: Request, res: Response) => {
       approvalEvidence: { type: 'passkey', approvalId: ticket.id },
     });
 
+    // 9. Advance request to terminal success
+    await updateRequest(approvalId, {
+      status: 'success',
+      tx_hash: signResult.txHash,
+    });
+
     await logAudit({
-      userId: ticket.userId,
+      userId: ticket.userId || 'anonymous',
       walletAddress: ticket.walletAddress,
       clientId: ticket.clientId,
       action: 'APPROVAL_EXECUTED_PASSKEY',
@@ -1135,90 +1160,63 @@ app.post('/api/approvals/:id/complete', async (req: Request, res: Response) => {
     });
 
     return res.json({
-      status: 'EXECUTED',
+      status: 'success',
       txHash: signResult.txHash,
       approvalId,
+      requestId: approvalId,
     });
   } catch (err: any) {
+    if (err.message === 'REPLAY_REJECTED') {
+      return res.status(409).json({ error: 'REPLAY_REJECTED', message: 'Ticket has already been used' });
+    }
+    if (err.message === 'APPROVAL_EXPIRED') {
+      return res.status(410).json({ error: 'APPROVAL_EXPIRED', message: 'Approval ticket has expired' });
+    }
+    if (err.message === 'UNKNOWN_APPROVAL') {
+      return res.status(404).json({ error: 'UNKNOWN_APPROVAL' });
+    }
+    if (err.message === 'PAYLOAD_MISMATCH') {
+      return res.status(400).json({ error: 'PAYLOAD_MISMATCH' });
+    }
     return res.status(400).json({ error: err.message || 'Approval execution failed' });
   }
-});
+}
 
-// Alias: POST /wallet/approvals/:id/complete -> same as /api/approvals/:id/complete
-app.post('/wallet/approvals/:id/complete', async (req: Request, res: Response) => {
-  const approvalId = req.params.id;
-  const { assertionResponse, credentialId } = req.body;
+app.post(['/api/approvals/:id/complete', '/wallet/approvals/:id/complete'], handleApprovalCompletion);
 
+// -------------------------------------------------------------
+// Request Lifecycle Inspection (GET /wallet/requests/:id)
+// -------------------------------------------------------------
+app.get('/wallet/requests/:id', async (req: Request, res: Response) => {
   try {
-    const ticket = getApproval(approvalId);
-    if (!ticket) {
-      return res.status(404).json({ error: 'UNKNOWN_APPROVAL' });
+    const record = await loadRequest(req.params.id);
+    if (!record) {
+      return res.status(404).json({ error: 'REQUEST_NOT_FOUND' });
     }
 
-    if (assertionResponse) {
-      if (assertionResponse.clientDataJSON) {
-        try {
-          const clientData = JSON.parse(Buffer.from(assertionResponse.clientDataJSON, 'base64url').toString('utf8'));
-          const expectedB64 = Buffer.from(ticket.payloadHash.replace(/^0x/, ''), 'hex').toString('base64url');
-          if (clientData.challenge !== expectedB64 && clientData.challenge !== ticket.payloadHash) {
-            return res.status(400).json({ error: 'Bad Passkey Assertion' });
-          }
-        } catch {
-          return res.status(400).json({ error: 'Bad Passkey Assertion' });
-        }
-      } else if (assertionResponse.challenge && assertionResponse.challenge !== ticket.payloadHash) {
-        return res.status(400).json({ error: 'Bad Passkey Assertion' });
-      }
+    const session = getSession(req);
+    if (session && record.user_id && session.userId !== record.user_id) {
+      return res.status(403).json({ error: 'FORBIDDEN' });
     }
-
-    await consumeApproval(approvalId, ticket.payloadHash);
-
-    if (process.env.NODE_ENV === 'production' && assertionResponse) {
-      const { data: passkeyRecord } = await supabase
-        .from('passkeys')
-        .select('*')
-        .eq('credential_id', credentialId)
-        .eq('user_id', ticket.userId)
-        .single();
-
-      if (!passkeyRecord) {
-        return res.status(403).json({ error: 'UNAUTHORIZED_PASSKEY_CREDENTIAL' });
-      }
-
-      await verifyPasskeyForPayload({
-        response: assertionResponse,
-        expectedChallenge: Buffer.from(ticket.payloadHash.replace(/^0x/, ''), 'hex').toString('base64url'),
-        storedAuthenticator: {
-          credentialID: Buffer.from(passkeyRecord.credential_id, 'base64url'),
-          credentialPublicKey: Buffer.from(passkeyRecord.credential_public_key),
-          counter: Number(passkeyRecord.counter),
-        },
-      });
-    }
-
-    const mpc = getMpcProvider();
-    const signResult = await mpc.signAndBroadcast({
-      mpcWalletId: ticket.walletId || 'turnkey-wallet',
-      unsignedTx: ticket.canonicalTx as any,
-      payloadHash: ticket.payloadHash,
-      approvalEvidence: { type: 'passkey', approvalId: ticket.id },
-    });
-
-    await logAudit({
-      userId: ticket.userId,
-      walletAddress: ticket.walletAddress,
-      clientId: ticket.clientId,
-      action: 'APPROVAL_EXECUTED_PASSKEY',
-      details: { approvalId, txHash: signResult.txHash },
-    });
 
     return res.json({
-      status: 'EXECUTED',
-      txHash: signResult.txHash,
-      approvalId,
+      requestId: record.id,
+      tool: record.tool,
+      status: record.status,
+      to: record.intent?.to,
+      amount: record.intent?.amount,
+      chain: record.intent?.chain || record.intent?.network,
+      walletAddress: record.canonical_tx?.from,
+      walletId: record.wallet_id,
+      payloadHash: record.payload_hash,
+      approveUrl: record.approve_url,
+      txHash: record.tx_hash,
+      error: record.error,
+      expiresAt: record.expires_at,
+      createdAt: record.created_at,
     });
   } catch (err: any) {
-    return res.status(400).json({ error: err.message || 'Approval execution failed' });
+    return res.status(500).json({ error: err.message });
   }
 });
 

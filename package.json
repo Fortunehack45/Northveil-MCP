@@ -8,7 +8,7 @@
     "build": "npx tsc",
     "start": "node dist/index.js",
     "dev": "npx tsx index.ts",
-    "test": "npx tsx test/grantEngine.test.ts && npx tsx test/approvals.test.ts && npx tsx test/mcpTools.test.ts && npx tsx test/boot.test.ts && npx tsx test/part2.test.ts && npx tsx test/followUp7.test.ts && npx tsx test/followUp8.test.ts && npx tsx test/emailOtp.test.ts && npx tsx test/followUp11.test.ts",
+    "test": "npx tsx test/grantEngine.test.ts && npx tsx test/approvals.test.ts && npx tsx test/mcpTools.test.ts && npx tsx test/boot.test.ts && npx tsx test/part2.test.ts && npx tsx test/followUp7.test.ts && npx tsx test/followUp8.test.ts && npx tsx test/emailOtp.test.ts && npx tsx test/followUp11.test.ts && npx tsx test/followUp12.test.ts",
     "test:mpc": "npx tsx ../scratch/test_real_non_custodial_mpc.ts"
   },
   "dependencies": {

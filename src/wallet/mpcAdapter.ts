@@ -1,6 +1,7 @@
 import { ethers } from 'ethers';
 import crypto from 'node:crypto';
 import { canonicalPayloadHash } from '../policy/grantEngine.js';
+import { assertSignPermit } from './requestLifecycle.js';
 
 export interface SignRequest {
   mpcWalletId: string;
@@ -35,15 +36,17 @@ export interface MpcProvider {
 }
 
 export function getMpcProvider(): MpcProvider {
-  if (process.env.NODE_ENV === 'production') {
-    if (!process.env.TURNKEY_API_PUBLIC_KEY || !process.env.TURNKEY_API_PRIVATE_KEY) {
-      throw new Error('FATAL: Production requires valid Turnkey MPC credentials (TURNKEY_API_PUBLIC_KEY). Server refuses to boot with unconfigured or custodial signers.');
+  const hosted = process.env.NODE_ENV === 'production' || process.env.VERCEL === '1' || process.env.NORTHVEIL_HOSTED === '1';
+  if (hosted) {
+    if (!process.env.TURNKEY_API_PUBLIC_KEY || !process.env.TURNKEY_API_PRIVATE_KEY || !process.env.TURNKEY_ORGANIZATION_ID) {
+      throw new Error('FATAL: hosted Northveil requires Turnkey');
     }
     return turnkeyProvider();
   }
 
-  // Local dev / test mock: never permitted in production
-  return process.env.TURNKEY_API_PUBLIC_KEY ? turnkeyProvider() : devMockProvider();
+  if (process.env.ALLOW_MOCK_SIGNER === '1') return devMockProvider();
+  if (process.env.TURNKEY_API_PUBLIC_KEY) return turnkeyProvider();
+  throw new Error('No signer configured. Set Turnkey or ALLOW_MOCK_SIGNER=1 for local tests only.');
 }
 
 function turnkeyProvider(): MpcProvider {
@@ -277,6 +280,9 @@ function turnkeyProvider(): MpcProvider {
     },
 
     async signAndBroadcast(req: SignRequest): Promise<SignResult> {
+      // 0. Single-use permit gate: Refuse to sign without an active, single-use approval permit
+      await assertSignPermit(req.mpcWalletId, req.payloadHash);
+
       const { TurnkeyClient } = await import('@turnkey/http');
       const { ApiKeyStamper } = await import('@turnkey/api-key-stamper');
 
@@ -356,8 +362,9 @@ function turnkeyProvider(): MpcProvider {
 }
 
 function devMockProvider(): MpcProvider {
-  if (process.env.NODE_ENV === 'production') {
-    throw new Error('SECURITY VIOLATION: Dev mock signer forbidden in production');
+  const hosted = process.env.NODE_ENV === 'production' || process.env.VERCEL === '1' || process.env.NORTHVEIL_HOSTED === '1';
+  if (hosted) {
+    throw new Error('SECURITY VIOLATION: Dev mock signer forbidden in hosted environment');
   }
 
   return {
@@ -385,6 +392,12 @@ function devMockProvider(): MpcProvider {
       };
     },
     async signAndBroadcast(req: SignRequest) {
+      const isHosted = process.env.NODE_ENV === 'production' || process.env.VERCEL === '1' || process.env.NORTHVEIL_HOSTED === '1';
+      if (isHosted) {
+        throw new Error('SECURITY VIOLATION: Dev mock signer forbidden in hosted environment');
+      }
+      await assertSignPermit(req.mpcWalletId, req.payloadHash);
+
       // Deterministic pseudo-hash for unit testing
       const fakeTxHash = ethers.keccak256(ethers.toUtf8Bytes(req.payloadHash + Date.now().toString()));
       return {

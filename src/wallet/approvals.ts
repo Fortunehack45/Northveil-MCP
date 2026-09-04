@@ -21,9 +21,9 @@ const inMemoryApprovals = new Map<string, PendingApproval>();
  * Persists to Supabase public.pending_approvals and in-memory cache.
  */
 export async function createApproval(
-  row: Omit<PendingApproval, 'id' | 'used'>
+  row: Omit<PendingApproval, 'id' | 'used'> & { id?: string }
 ): Promise<PendingApproval> {
-  const approvalId = 'appr_' + randomBytes(16).toString('hex');
+  const approvalId = row.id || ('appr_' + randomBytes(16).toString('hex'));
   const record: PendingApproval = {
     ...row,
     id: approvalId,
@@ -119,4 +119,60 @@ export async function consumeApproval(
  */
 export function getApproval(id: string): PendingApproval | undefined {
   return inMemoryApprovals.get(id);
+}
+
+/**
+ * Asynchronously retrieve pending approval from memory or Postgres
+ */
+export async function getApprovalAsync(id: string): Promise<PendingApproval | undefined> {
+  const mem = inMemoryApprovals.get(id);
+  if (mem) return mem;
+
+  try {
+    const { data } = await supabase
+      .from('pending_approvals')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+    if (data) {
+      const rec: PendingApproval = {
+        id: data.id,
+        userId: data.user_id,
+        clientId: data.client_id,
+        walletId: data.wallet_id,
+        walletAddress: data.canonical_tx?.from || '',
+        payloadHash: data.payload_hash,
+        canonicalTx: data.canonical_tx,
+        expiresAt: new Date(data.expires_at),
+        used: data.used,
+      };
+      inMemoryApprovals.set(id, rec);
+      return rec;
+    }
+  } catch {}
+
+  try {
+    const { data: reqData } = await supabase
+      .from('agent_requests')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+    if (reqData) {
+      const rec: PendingApproval = {
+        id: reqData.id,
+        userId: reqData.user_id,
+        clientId: reqData.grant_id || 'claude',
+        walletId: reqData.wallet_id,
+        walletAddress: reqData.canonical_tx?.from || '',
+        payloadHash: reqData.payload_hash,
+        canonicalTx: reqData.canonical_tx,
+        expiresAt: new Date(reqData.expires_at),
+        used: reqData.status === 'success' || reqData.status === 'denied',
+      };
+      inMemoryApprovals.set(id, rec);
+      return rec;
+    }
+  } catch {}
+
+  return undefined;
 }

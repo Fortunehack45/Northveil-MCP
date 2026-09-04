@@ -195,3 +195,36 @@ insert into public.oauth_clients (id, name, redirect_uri_prefixes)
 values ('claude', 'Claude', array['https://claude.ai/', 'https://claude.com/'])
 on conflict (id) do nothing;
 
+-- 14. Agent Requests (Non-custodial two-gate request lifecycle)
+create table if not exists public.agent_requests (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.users(id),
+  grant_id uuid references public.grants(id),
+  wallet_id uuid not null references public.wallets(id),
+  tool text not null,
+  intent jsonb not null,
+  canonical_tx jsonb not null,
+  payload_hash text not null,
+  status text not null,
+  approve_url text,
+  tx_hash text,
+  error text,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists agent_requests_user_idx on public.agent_requests (user_id, created_at desc);
+
+-- 15. Sign Permits (Single-use permits consumed atomically by MPC before signTransaction)
+create table if not exists public.sign_permits (
+  id uuid primary key default gen_random_uuid(),
+  mpc_wallet_id text not null,
+  payload_hash text not null,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists sign_permits_wallet_hash_idx on public.sign_permits (mpc_wallet_id, payload_hash);
+
+

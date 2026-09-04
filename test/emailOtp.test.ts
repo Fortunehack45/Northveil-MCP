@@ -286,15 +286,21 @@ async function main() {
       chain: 'base',
     });
 
-    assert.strictEqual(transferResult.status, 'APPROVAL_REQUIRED', 'Always Ask mode must require approval');
-    assert(transferResult.approvalId, 'Must return approvalId');
+    assert.strictEqual(
+      transferResult.status,
+      'pending_approval',
+      'Always Ask mode must require approval'
+    );
+    assert(transferResult.approvalId || (transferResult as any).requestId, 'Must return approvalId');
     assert(transferResult.approveUrl, 'Must return approveUrl');
     assert(
+      transferResult.approveUrl.includes('https://wallet.northveil.xyz/approve/') ||
       transferResult.approveUrl.includes('https://wallet.northveil.xyz/?action=approvals&id='),
       'Must direct human to wallet approval URL'
     );
     assert.notStrictEqual(transferResult.status, 'EXECUTED', 'Must never return EXECUTED without human approval');
-    console.log('   ✓ Always Ask mode returns APPROVAL_REQUIRED and approveUrl; agent never receives key');
+    assert.notStrictEqual(transferResult.status, 'success', 'Must never return success without human approval');
+    console.log('   ✓ Always Ask mode returns pending_approval and approveUrl; agent never receives key');
 
     // -------------------------------------------------------------
     // Test 10: Two emails -> two users -> two addresses on same MCP URL
