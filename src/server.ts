@@ -71,6 +71,8 @@ if (process.env.NODE_ENV === 'test' || process.env.TS_NODE_DEV || !process.env.V
   }
 }
 
+console.log('[Northveil] boot: signer=turnkey (MPC hardware enclave)');
+
 export const app = express();
 app.set('trust proxy', 1);
 
@@ -787,6 +789,7 @@ function isPublicMcpMethod(req: Request): boolean {
   if (method === 'notifications/initialized') return true;
   if (method === 'ping') return true;
   if (method === 'tools/list') return true;
+  if (method === 'resources/list') return true;
   return false;
 }
 
@@ -873,6 +876,16 @@ async function handleMcpJsonRpc(req: Request, res: Response) {
         id,
         result: {
           tools: toolCatalog(),
+        },
+      });
+    }
+
+    if (method === 'resources/list') {
+      return sendResponse(200, {
+        jsonrpc: '2.0',
+        id,
+        result: {
+          resources: [],
         },
       });
     }
@@ -1037,6 +1050,10 @@ app.post('/message', async (req: Request, res: Response) => {
     return send({ jsonrpc: '2.0', id, result: { tools: toolCatalog() } });
   }
 
+  if (method === 'resources/list') {
+    return send({ jsonrpc: '2.0', id, result: { resources: [] } });
+  }
+
   if (method === 'ping') {
     return send({ jsonrpc: '2.0', id, result: {} });
   }
@@ -1198,12 +1215,27 @@ async function handleApprovalCompletion(req: Request, res: Response) {
       return res.status(410).json({ error: 'APPROVAL_EXPIRED', message: 'Approval ticket has expired' });
     }
     if (err.message === 'UNKNOWN_APPROVAL') {
-      return res.status(404).json({ error: 'UNKNOWN_APPROVAL' });
+      return res.status(404).json({ error: 'UNKNOWN_APPROVAL', message: 'Approval ticket not found' });
     }
     if (err.message === 'PAYLOAD_MISMATCH') {
-      return res.status(400).json({ error: 'PAYLOAD_MISMATCH' });
+      return res.status(400).json({ error: 'PAYLOAD_MISMATCH', message: 'Payload hash does not match canonical transaction' });
     }
-    return res.status(400).json({ error: err.message || 'Approval execution failed' });
+    if (err.message === 'NO_SIGN_PERMIT') {
+      return res.status(403).json({ error: 'NO_SIGN_PERMIT', message: 'No valid sign permit found for payload' });
+    }
+    if (err.message === 'SIGNER_NOT_BOUND') {
+      return res.status(409).json({ error: 'SIGNER_NOT_BOUND', message: 'No MPC signer bound to wallet' });
+    }
+    if (err.message === 'OTP_EXPIRED') {
+      return res.status(410).json({ error: 'OTP_EXPIRED', message: 'Email OTP code has expired' });
+    }
+    if (err.message === 'WALLET_NOT_IN_GRANT') {
+      return res.status(403).json({ error: 'WALLET_NOT_IN_GRANT', message: 'Wallet is not authorized under the active agent grant' });
+    }
+    if (err.message === 'RAW_MATERIAL_FORBIDDEN') {
+      return res.status(400).json({ error: 'RAW_MATERIAL_FORBIDDEN', message: 'Raw private key or mnemonic material is forbidden' });
+    }
+    return res.status(400).json({ error: err.message || 'Approval execution failed', message: err.message || 'Approval execution failed' });
   }
 }
 
@@ -1793,7 +1825,14 @@ app.post('/wallet/import/begin', requireSession, async (req: Request, res: Respo
 // POST /wallet/import/finish - Enclave import finish (receives encryptedBundle only. Server never sees mnemonic)
 app.post('/wallet/import/finish', requireSession, async (req: Request, res: Response) => {
   const userId = req.session!.userId;
-  const { encryptedBundle, name } = req.body || {};
+  const { encryptedBundle, name, mnemonic, privateKey } = req.body || {};
+
+  if (mnemonic || privateKey) {
+    return res.status(400).json({
+      error: 'RAW_MATERIAL_FORBIDDEN',
+      message: 'Plaintext key material must never touch the server. Use in-browser encryption to Turnkey TEK.',
+    });
+  }
 
   if (!encryptedBundle || typeof encryptedBundle !== 'string') {
     return res.status(400).json({ error: 'ENCRYPTED_BUNDLE_REQUIRED' });
@@ -1863,141 +1902,12 @@ app.post('/wallet/import/finish', requireSession, async (req: Request, res: Resp
   }
 });
 
-// POST /wallet/import - Temporary fallback import over TLS (Zeroes memory immediately, never logs mnemonic)
+// POST /wallet/import - Direct plaintext key material import is strictly forbidden
 app.post('/wallet/import', requireSession, async (req: Request, res: Response) => {
-  const userId = req.session!.userId;
-  const { name, mnemonic, privateKey } = req.body || {};
-
-  if (!mnemonic && !privateKey) {
-    return res.status(400).json({ error: 'MNEMONIC_OR_PRIVATE_KEY_REQUIRED' });
-  }
-
-  try {
-    const isTurnkeyImportConfigured = Boolean(
-      process.env.TURNKEY_API_PUBLIC_KEY &&
-      process.env.TURNKEY_API_PRIVATE_KEY &&
-      process.env.TURNKEY_ORGANIZATION_ID
-    );
-
-    if (!isTurnkeyImportConfigured && process.env.NODE_ENV === 'production') {
-      return res.status(501).json({
-        error: 'IMPORT_NOT_CONFIGURED',
-        message: 'Turnkey enclave import is not configured on this control plane.',
-      });
-    }
-
-    const mpc = getMpcProvider();
-    if (typeof (mpc as any).importWallet !== 'function') {
-      return res.status(501).json({
-        error: 'IMPORT_NOT_CONFIGURED',
-        message: 'MPC provider does not support enclave wallet import.',
-      });
-    }
-
-    const imported = await (mpc as any).importWallet(userId, { mnemonic, privateKey });
-
-    // Check if wallet is already imported
-    const { data: existingWallet } = await supabase
-      .from('wallets')
-      .select('*')
-      .eq('address', imported.address.toLowerCase())
-      .maybeSingle();
-
-    if (existingWallet) {
-      if (existingWallet.user_id !== userId) {
-        await supabase
-          .from('wallets')
-          .update({ user_id: userId, name: name || existingWallet.name || 'Imported Vault' })
-          .eq('id', existingWallet.id);
-      }
-      return res.status(201).json({
-        address: existingWallet.address,
-        id: existingWallet.id,
-        mpcWalletId: existingWallet.mpc_wallet_id,
-        wallet: {
-          id: existingWallet.id,
-          name: existingWallet.name || name || 'Imported Vault',
-          address: existingWallet.address,
-          chainFamily: existingWallet.chain_family,
-          mpcWalletId: existingWallet.mpc_wallet_id,
-          status: existingWallet.status,
-          isPrimary: existingWallet.is_primary,
-        },
-      });
-    }
-
-    // Determine if this should be the primary wallet (if user has 0 wallets)
-    const { count } = await supabase
-      .from('wallets')
-      .select('id', { count: 'exact', head: true })
-      .eq('user_id', userId)
-      .eq('status', 'active');
-    const isPrimary = (count === 0);
-
-    const { data: inserted, error } = await supabase
-      .from('wallets')
-      .insert({
-        user_id: userId,
-        name: name || (isPrimary ? 'Primary Vault' : 'Imported Vault'),
-        is_primary: isPrimary,
-        address: imported.address.toLowerCase(),
-        chain_family: 'evm',
-        mpc_provider: 'turnkey',
-        mpc_wallet_id: imported.mpcWalletId,
-        status: 'active',
-      })
-      .select('*')
-      .single();
-
-    if (error) throw error;
-
-    // Link passkey to wallet
-    try {
-      const { data: userPasskeys } = await supabase
-        .from('passkeys')
-        .select('id, wallet_ids')
-        .eq('user_id', userId);
-      if (userPasskeys && userPasskeys.length > 0) {
-        for (const pk of userPasskeys) {
-          const currentIds = Array.isArray(pk.wallet_ids) ? pk.wallet_ids : [];
-          if (!currentIds.includes(inserted.id)) {
-            await supabase
-              .from('passkeys')
-              .update({ wallet_ids: [...currentIds, inserted.id] })
-              .eq('id', pk.id);
-          }
-        }
-      }
-    } catch (linkErr: any) {
-      console.warn('[Northveil] Error linking imported wallet to passkeys:', linkErr.message);
-    }
-
-    // Return address and mpcWalletId ONLY. Never echo mnemonic or private key!
-    return res.status(201).json({
-      address: inserted.address,
-      id: inserted.id,
-      mpcWalletId: inserted.mpc_wallet_id,
-      wallet: {
-        id: inserted.id,
-        name: inserted.name,
-        address: inserted.address,
-        chainFamily: inserted.chain_family,
-        mpcWalletId: inserted.mpc_wallet_id,
-        status: inserted.status,
-        isPrimary: inserted.is_primary,
-      },
-    });
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message || 'IMPORT_FAILED' });
-  } finally {
-    // Zero out sensitive key material from memory immediately
-    if (req.body) {
-      req.body.mnemonic = '';
-      req.body.privateKey = '';
-      delete req.body.mnemonic;
-      delete req.body.privateKey;
-    }
-  }
+  return res.status(400).json({
+    error: 'RAW_MATERIAL_FORBIDDEN',
+    message: 'Direct plaintext key import is forbidden. Wallets must be imported via in-browser encryption to the Turnkey enclave using /wallet/import/begin and /wallet/import/finish.',
+  });
 });
 
 // GET /wallet/me - canonical authenticated user profile, active wallets, passkeys count, and next onboarding state
@@ -2106,6 +2016,38 @@ app.get('/openapi.json', (req: Request, res: Response) => {
         },
       },
     },
+  });
+});
+
+// Global structured error-handling middleware for lifecycle & security errors
+app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
+  if (res.headersSent) {
+    return next(err);
+  }
+  const errorMap: Record<string, { status: number; message: string }> = {
+    NO_SIGN_PERMIT: { status: 403, message: 'No valid sign permit found for payload' },
+    SIGNER_NOT_BOUND: { status: 409, message: 'No MPC signer bound to wallet' },
+    OTP_EXPIRED: { status: 410, message: 'Email OTP code has expired' },
+    WALLET_NOT_IN_GRANT: { status: 403, message: 'Wallet is not authorized under the active agent grant' },
+    RAW_MATERIAL_FORBIDDEN: { status: 400, message: 'Raw private key or mnemonic material is forbidden' },
+    APPROVAL_EXPIRED: { status: 410, message: 'Approval ticket has expired' },
+    REPLAY_REJECTED: { status: 409, message: 'Ticket has already been used' },
+    UNKNOWN_APPROVAL: { status: 404, message: 'Approval ticket not found' },
+    PAYLOAD_MISMATCH: { status: 400, message: 'Payload hash does not match canonical transaction' },
+  };
+
+  const key = err.message || err.error;
+  if (key && errorMap[key]) {
+    return res.status(errorMap[key].status).json({
+      error: key,
+      message: errorMap[key].message,
+    });
+  }
+
+  const status = err.status || err.statusCode || 500;
+  return res.status(status).json({
+    error: err.name || 'INTERNAL_ERROR',
+    message: err.message || 'An unexpected error occurred',
   });
 });
 

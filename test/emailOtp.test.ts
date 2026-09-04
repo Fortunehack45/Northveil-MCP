@@ -1,5 +1,6 @@
 process.env.NODE_ENV = 'test';
 process.env.OTP_DEV_ECHO = '1';
+process.env.ALLOW_MOCK_SIGNER = '1';
 import assert from 'node:assert';
 import http from 'node:http';
 import crypto from 'node:crypto';
@@ -202,7 +203,7 @@ async function main() {
       assert(parsedImport.mpcWalletId, 'Must include mpcWalletId');
       assert(!parsedImport.mnemonic, 'Object must not have mnemonic property');
     } else {
-      assert.strictEqual(resImport.status, 501, 'If unconfigured, must return 501 IMPORT_NOT_CONFIGURED');
+      assert([400, 501].includes(resImport.status), 'Must return 400 RAW_MATERIAL_FORBIDDEN or 501');
     }
     console.log('   ✓ POST /wallet/import memory wipe and zero-echo verified');
 

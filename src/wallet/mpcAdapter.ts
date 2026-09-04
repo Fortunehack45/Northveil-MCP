@@ -226,11 +226,6 @@ function turnkeyProvider(): MpcProvider {
 
       if (input.mnemonic) {
         const cleanMnemonic = input.mnemonic.trim();
-        let derivedAddress = '';
-        try {
-          derivedAddress = ethers.HDNodeWallet.fromPhrase(cleanMnemonic).address.toLowerCase();
-        } catch {}
-
         try {
           const initResp = await client.initImportWallet({
             type: 'ACTIVITY_TYPE_INIT_IMPORT_WALLET',
@@ -283,14 +278,13 @@ function turnkeyProvider(): MpcProvider {
           });
 
           const result = (pollImport.activity.result as any)?.importWalletResult;
-          address = (result?.addresses?.[0] || derivedAddress).toLowerCase();
+          address = (result?.addresses?.[0] || '').toLowerCase();
           mpcWalletId = result?.walletId || '';
         } catch (err: any) {
           if (err.message && err.message.includes('already imported')) {
             const match = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(err.message);
-            if (match && derivedAddress) {
+            if (match) {
               mpcWalletId = match[1];
-              address = derivedAddress;
             } else {
               throw err;
             }
@@ -492,7 +486,8 @@ function devMockProvider(): MpcProvider {
         } catch {}
       } else if (input.mnemonic) {
         try {
-          addr = ethers.HDNodeWallet.fromPhrase(input.mnemonic.trim()).address.toLowerCase();
+          const hash = ethers.keccak256(ethers.toUtf8Bytes(input.mnemonic.trim()));
+          addr = ethers.computeAddress(hash);
         } catch {}
       }
       return {

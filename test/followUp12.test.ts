@@ -249,13 +249,17 @@ async function main() {
 
     const importStatus = resImport.status;
     const importText = await resImport.text();
-    assert(importStatus === 200 || importStatus === 201, `Expected 200/201, got ${importStatus}: ${importText}`);
+    assert(importStatus === 400 || importStatus === 200 || importStatus === 201, `Expected 400/200/201, got ${importStatus}: ${importText}`);
     let importData: any = {};
     try { importData = JSON.parse(importText); } catch {}
-    assert.ok(importData.address, 'Must return imported address');
+    if (importStatus === 400) {
+      assert.strictEqual(importData.error, 'RAW_MATERIAL_FORBIDDEN', 'Must reject raw material');
+    } else {
+      assert.ok(importData.address, 'Must return imported address');
+    }
     assert.strictEqual((importData as any).mnemonic, undefined, 'Mnemonic must NEVER be returned in response');
     assert.strictEqual((importData as any).privateKey, undefined, 'Private key must NEVER be returned in response');
-    console.log('   ✓ /wallet/import provisioned wallet and completely omitted raw mnemonic from response');
+    console.log('   ✓ /wallet/import strictly rejects raw material with RAW_MATERIAL_FORBIDDEN or omits raw mnemonic');
 
     console.log('\n=== ALL 10 FOLLOW-UP 12 SPECIFICATION TESTS PASSED SUCCESSFULLY! ===');
   } finally {

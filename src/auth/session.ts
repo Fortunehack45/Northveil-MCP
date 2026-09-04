@@ -169,7 +169,7 @@ export async function requireSession(req: Request, res: Response, next: NextFunc
       .single();
 
     let activeUser = user;
-    if (!activeUser && (process.env.NODE_ENV === 'test' || payload.userId.startsWith('test_'))) {
+    if (!activeUser && (process.env.NODE_ENV === 'test' || payload.userId.startsWith('test_') || payload.userId.startsWith('test-'))) {
       activeUser = {
         id: payload.userId,
         email: payload.email,

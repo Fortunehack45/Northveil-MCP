@@ -100,6 +100,17 @@ if (isStdioMode) {
         return;
       }
 
+      if (method === 'resources/list') {
+        process.stdout.write(JSON.stringify({
+          jsonrpc: '2.0',
+          id,
+          result: {
+            resources: [],
+          },
+        }) + '\n');
+        return;
+      }
+
       if (method === 'tools/call') {
         const apiKey = process.env.NORTHVEIL_API_KEY || '';
         const mockReq: any = {

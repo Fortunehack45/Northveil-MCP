@@ -139,7 +139,7 @@ export async function countPasskeys(userId: string): Promise<number> {
     console.warn('[Northveil OTP] countPasskeys error:', error.message);
     return 0;
   }
-  return typeof count === 'number' ? count : (data?.length || 0);
+  return typeof count === 'number' ? count : ((data as any)?.length || 0);
 }
 
 /**
@@ -155,7 +155,7 @@ export async function countWallets(userId: string): Promise<number> {
     console.warn('[Northveil OTP] countWallets error:', error.message);
     return 0;
   }
-  return typeof count === 'number' ? count : (data?.length || 0);
+  return typeof count === 'number' ? count : ((data as any)?.length || 0);
 }
 
 /**
@@ -263,26 +263,42 @@ export async function startEmailOtp(email: string, clientIp?: string): Promise<{
   }
 
   // 2. Invalidate previous unused codes for this email
-  await supabase
-    .from('email_otp')
-    .update({ consumed_at: new Date().toISOString() })
-    .eq('email', normEmail)
-    .is('consumed_at', null);
+  try {
+    await supabase
+      .from('email_otp')
+      .update({ consumed_at: new Date().toISOString() })
+      .eq('email', normEmail)
+      .is('consumed_at', null);
+  } catch {
+    // Non-fatal if invalidate previous fails due to network glitch
+  }
 
   // 3. Generate and hash code with 5-minute expiry
   const code = randomCode();
   const code_hash = hashOtp(normEmail, code);
   const expires_at = new Date(Date.now() + OTP_TTL_MS).toISOString();
 
-  const { error: insertError } = await supabase.from('email_otp').insert({
-    email: normEmail,
-    code_hash,
-    expires_at,
-    attempt_count: 0,
-  });
+  let insertError: any = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await supabase.from('email_otp').insert({
+        email: normEmail,
+        code_hash,
+        expires_at,
+        attempt_count: 0,
+      });
+      insertError = res.error;
+      if (!insertError) break;
+    } catch (err: any) {
+      insertError = err;
+    }
+    if (attempt < 2) {
+      await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
+    }
+  }
 
   if (insertError) {
-    throw new HttpError(500, `OTP_PERSISTENCE_FAILED: ${insertError.message}`);
+    throw new HttpError(500, `OTP_PERSISTENCE_FAILED: ${insertError.message || insertError}`);
   }
 
   // 4. Send email
