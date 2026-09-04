@@ -83,9 +83,8 @@ export async function sendEmailCode(email: string, code: string): Promise<boolea
   const from = process.env.EMAIL_FROM || 'Northveil <auth@northveil.xyz>';
 
   if (!apiKey) {
-    // In dev or test environments without API key, log notice
-    console.info(`[Northveil Email OTP] Code for ${email}: ${code}`);
-    return true;
+    console.info(`[Northveil Email OTP] No RESEND_API_KEY configured. Code for ${email}: ${code}`);
+    return false;
   }
 
   try {
@@ -116,7 +115,12 @@ export async function sendEmailCode(email: string, code: string): Promise<boolea
         `,
       }),
     });
-    return res.ok;
+    if (!res.ok) {
+      const errBody = await res.text();
+      console.warn('[Northveil Email OTP] Resend dispatch failed:', res.status, errBody);
+      return false;
+    }
+    return true;
   } catch (err: any) {
     console.warn('[Northveil Email OTP] Resend dispatch warning:', err.message);
     return false;
