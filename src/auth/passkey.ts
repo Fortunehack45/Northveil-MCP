@@ -200,6 +200,7 @@ export async function savePasskeyRecord(opts: {
   credentialPublicKey: Buffer;
   counter: number;
   transports?: string[];
+  walletIds?: string[];
 }): Promise<void> {
   try {
     await supabase.from('passkeys').insert({
@@ -208,6 +209,7 @@ export async function savePasskeyRecord(opts: {
       credential_public_key: opts.credentialPublicKey,
       counter: opts.counter,
       transports: opts.transports || [],
+      wallet_ids: opts.walletIds || [],
       last_used_at: new Date().toISOString(),
     });
   } catch (err: any) {
@@ -224,6 +226,7 @@ export async function findPasskeyByCredentialId(credentialId: string): Promise<{
   credential_id: string;
   credential_public_key: Buffer;
   counter: number;
+  wallet_ids?: string[];
 } | null> {
   try {
     const { data } = await supabase
@@ -241,6 +244,7 @@ export async function findPasskeyByCredentialId(credentialId: string): Promise<{
           ? data.credential_public_key
           : Buffer.from(data.credential_public_key),
         counter: Number(data.counter || 0),
+        wallet_ids: data.wallet_ids || [],
       };
     }
   } catch {}

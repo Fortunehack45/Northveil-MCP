@@ -11,6 +11,7 @@ export interface SessionPayload {
   userId: string;
   email: string;
   exp: number;
+  passkeyOk?: boolean;
 }
 
 export interface AuthenticatedUser {
@@ -32,6 +33,7 @@ export interface WalletSession {
   userId: string;
   user: AuthenticatedUser;
   wallet?: AuthenticatedWallet;
+  passkeyOk?: boolean;
 }
 
 declare global {
@@ -45,9 +47,17 @@ declare global {
 /**
  * Creates a signed stateless HMAC-SHA256 session token
  */
-export function signSessionToken(payload: { userId: string; email: string }, expiresInHours: number = 72): string {
+export function signSessionToken(
+  payload: { userId: string; email: string; passkeyOk?: boolean },
+  expiresInHours: number = 72
+): string {
   const exp = Math.floor(Date.now() / 1000) + expiresInHours * 3600;
-  const data = JSON.stringify({ userId: payload.userId, email: payload.email, exp });
+  const data = JSON.stringify({
+    userId: payload.userId,
+    email: payload.email,
+    passkeyOk: !!payload.passkeyOk,
+    exp,
+  });
   const b64Data = Buffer.from(data).toString('base64url');
   const signature = crypto.createHmac('sha256', SESSION_SECRET).update(b64Data).digest('base64url');
   return `${b64Data}.${signature}`;
@@ -181,6 +191,7 @@ export async function requireSession(req: Request, res: Response, next: NextFunc
             status: wallet.status,
           }
         : undefined,
+      passkeyOk: !!payload.passkeyOk,
     };
 
     next();

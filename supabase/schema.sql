@@ -3,17 +3,31 @@
 
 create extension if not exists "pgcrypto";
 
--- 1. Users authenticated via Google OAuth
+-- 1. Users authenticated via Google OAuth or Email OTP
 create table if not exists public.users (
   id uuid primary key default gen_random_uuid(),
   email text not null,
   email_verified boolean not null default false,
-  google_sub text not null unique,
+  email_verified_at timestamptz,
+  google_sub text unique,
   name text,
   avatar_url text,
   created_at timestamptz not null default now(),
   last_login_at timestamptz
 );
+
+-- 1b. Email One-Time Passcodes (5-minute TTL, single-use, rate-limited)
+create table if not exists public.email_otp (
+  id uuid primary key default gen_random_uuid(),
+  email text not null,
+  code_hash text not null,
+  expires_at timestamptz not null,
+  consumed_at timestamptz,
+  attempt_count int not null default 0,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists email_otp_email_idx on public.email_otp (email, created_at desc);
 
 -- 2. WebAuthn Passkeys enrolled for user verification and transaction step-up
 create table if not exists public.passkeys (
@@ -23,6 +37,7 @@ create table if not exists public.passkeys (
   credential_public_key bytea not null,
   counter bigint not null default 0,
   transports text[],
+  wallet_ids uuid[] not null default '{}',
   created_at timestamptz not null default now(),
   last_used_at timestamptz
 );

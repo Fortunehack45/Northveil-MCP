@@ -70,7 +70,10 @@ export async function prepareTransfer(
   },
   args: PrepareTransferInput
 ) {
-  const chain = args.chain || 'eip155:8453';
+  let chain = args.chain || 'eip155:8453';
+  if (chain === 'base') chain = 'eip155:8453';
+  else if (chain === 'mainnet' || chain === 'ethereum') chain = 'eip155:1';
+  else if (chain === 'sepolia') chain = 'eip155:11155111';
   const asset = (args.asset || 'ETH').toUpperCase();
   const to = (args.to || '').trim();
   const data = (args.data || '0x').trim();

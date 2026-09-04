@@ -43,6 +43,7 @@ import {
   findPasskeyByCredentialId,
   challengeStore,
 } from './auth/passkey.js';
+import { startEmailOtp, verifyEmailOtp, nextStep } from './auth/emailOtp.js';
 import crypto from 'node:crypto';
 
 
@@ -1362,6 +1363,38 @@ app.get('/auth/google/callback', async (req: Request, res: Response) => {
 });
 
 // -------------------------------------------------------------
+// Email OTP Endpoints (5-minute TTL, Rate-Limited, Single-Use)
+// -------------------------------------------------------------
+app.post('/auth/email/start', async (req: Request, res: Response) => {
+  try {
+    const { email } = req.body || {};
+    const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip || req.socket.remoteAddress;
+    const result = await startEmailOtp(email, clientIp);
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(err.statusCode || 400).json({ error: err.message || 'OTP_START_FAILED' });
+  }
+});
+
+app.post('/auth/email/verify', async (req: Request, res: Response) => {
+  try {
+    const { email, code } = req.body || {};
+    const result = await verifyEmailOtp(email, code);
+    const isProd = process.env.NODE_ENV === 'production';
+    res.cookie('nv_session', result.sessionToken, {
+      httpOnly: true,
+      secure: isProd,
+      sameSite: 'lax',
+      maxAge: 72 * 3600 * 1000,
+      domain: isProd ? '.northveil.xyz' : undefined,
+    });
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(err.statusCode || 400).json({ error: err.message || 'OTP_VERIFY_FAILED' });
+  }
+});
+
+// -------------------------------------------------------------
 // WebAuthn Passkey Registration & Login Endpoints
 // -------------------------------------------------------------
 app.post('/auth/passkey/register/begin', async (req: Request, res: Response) => {
@@ -1402,12 +1435,22 @@ app.post('/auth/passkey/register/finish', async (req: Request, res: Response) =>
       origin: req.headers.origin as string,
       rpID: isLocal ? 'localhost' : undefined,
     });
+
+    // Query existing wallets to link to this passkey credential
+    const { data: userWallets } = await supabase
+      .from('wallets')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('status', 'active');
+    const existingWalletIds = (userWallets || []).map((w: any) => w.id);
+
     await savePasskeyRecord({
       userId,
       credentialId: verified.credentialId,
       credentialPublicKey: verified.credentialPublicKey,
       counter: verified.counter,
       transports: req.body?.response?.transports,
+      walletIds: existingWalletIds,
     });
     challengeStore.delete(`reg_${userId}`);
     return res.json({ success: true, credentialId: verified.credentialId });
@@ -1474,7 +1517,8 @@ app.post('/auth/passkey/login/finish', async (req: Request, res: Response) => {
       .eq('status', 'active')
       .maybeSingle();
 
-    const sessionToken = signSessionToken({ userId: passkey.user_id, email: user?.email || '' });
+    // Session elevated with passkeyOk: true
+    const sessionToken = signSessionToken({ userId: passkey.user_id, email: user?.email || '', passkeyOk: true });
     const isProd = process.env.NODE_ENV === 'production';
     res.cookie('nv_session', sessionToken, {
       httpOnly: true,
@@ -1511,7 +1555,7 @@ app.post('/wallet/create', requireSession, async (req: Request, res: Response) =
       .maybeSingle();
 
     if (existing) {
-      return res.json({ wallet: existing });
+      return res.json({ address: existing.address, wallet: existing });
     }
 
     const mpc = getMpcProvider();
@@ -1521,6 +1565,7 @@ app.post('/wallet/create', requireSession, async (req: Request, res: Response) =
       .from('wallets')
       .insert({
         user_id: userId,
+        name: req.body?.name || 'Primary Vault',
         address: created.address.toLowerCase(),
         chain_family: 'evm',
         mpc_provider: 'turnkey',
@@ -1531,20 +1576,135 @@ app.post('/wallet/create', requireSession, async (req: Request, res: Response) =
       .single();
 
     if (error) throw error;
-    return res.status(201).json({ wallet: inserted });
+
+    // Link passkey to wallet: append wallet.id to passkeys.wallet_ids for this user
+    try {
+      const { data: userPasskeys } = await supabase
+        .from('passkeys')
+        .select('id, wallet_ids')
+        .eq('user_id', userId);
+      if (userPasskeys && userPasskeys.length > 0) {
+        for (const pk of userPasskeys) {
+          const currentIds = Array.isArray(pk.wallet_ids) ? pk.wallet_ids : [];
+          if (!currentIds.includes(inserted.id)) {
+            await supabase
+              .from('passkeys')
+              .update({ wallet_ids: [...currentIds, inserted.id] })
+              .eq('id', pk.id);
+          }
+        }
+      }
+    } catch (linkErr: any) {
+      console.warn('[Northveil] Error linking wallet to passkeys:', linkErr.message);
+    }
+
+    return res.status(201).json({ address: inserted.address, wallet: inserted });
   } catch (err: any) {
     console.error('[Northveil] /wallet/create error:', err);
     return res.status(500).json({ error: err.message || 'WALLET_CREATION_FAILED' });
   }
 });
 
-// GET /wallet/me - returns authenticated user, active wallet, passkeys, and agent clients
+// POST /wallet/import - Enclave import into MPC (Drop mnemonic immediately; never log it)
+app.post('/wallet/import', requireSession, async (req: Request, res: Response) => {
+  const userId = req.session!.userId;
+  const { name, mnemonic, privateKey } = req.body || {};
+
+  if (!mnemonic && !privateKey) {
+    return res.status(400).json({ error: 'MNEMONIC_OR_PRIVATE_KEY_REQUIRED' });
+  }
+
+  try {
+    const isTurnkeyImportConfigured = Boolean(
+      process.env.TURNKEY_API_PUBLIC_KEY &&
+      process.env.TURNKEY_API_PRIVATE_KEY &&
+      process.env.TURNKEY_ORGANIZATION_ID
+    );
+
+    if (!isTurnkeyImportConfigured) {
+      return res.status(501).json({
+        error: 'IMPORT_NOT_CONFIGURED',
+        message: 'Turnkey enclave import is not configured on this control plane.',
+      });
+    }
+
+    const mpc = getMpcProvider();
+    if (typeof (mpc as any).importWallet !== 'function') {
+      return res.status(501).json({
+        error: 'IMPORT_NOT_CONFIGURED',
+        message: 'MPC provider does not support enclave wallet import.',
+      });
+    }
+
+    const imported = await (mpc as any).importWallet(userId, { mnemonic, privateKey });
+
+    const { data: inserted, error } = await supabase
+      .from('wallets')
+      .insert({
+        user_id: userId,
+        name: name || 'Imported Vault',
+        address: imported.address.toLowerCase(),
+        chain_family: 'evm',
+        mpc_provider: 'turnkey',
+        mpc_wallet_id: imported.mpcWalletId,
+        status: 'active',
+      })
+      .select('*')
+      .single();
+
+    if (error) throw error;
+
+    // Link passkey to wallet
+    try {
+      const { data: userPasskeys } = await supabase
+        .from('passkeys')
+        .select('id, wallet_ids')
+        .eq('user_id', userId);
+      if (userPasskeys && userPasskeys.length > 0) {
+        for (const pk of userPasskeys) {
+          const currentIds = Array.isArray(pk.wallet_ids) ? pk.wallet_ids : [];
+          if (!currentIds.includes(inserted.id)) {
+            await supabase
+              .from('passkeys')
+              .update({ wallet_ids: [...currentIds, inserted.id] })
+              .eq('id', pk.id);
+          }
+        }
+      }
+    } catch (linkErr: any) {
+      console.warn('[Northveil] Error linking imported wallet to passkeys:', linkErr.message);
+    }
+
+    // Return address and mpcWalletId ONLY. Never echo mnemonic or private key!
+    return res.status(201).json({
+      address: inserted.address,
+      mpcWalletId: inserted.mpc_wallet_id,
+      wallet: {
+        id: inserted.id,
+        address: inserted.address,
+        chainFamily: inserted.chain_family,
+        mpcWalletId: inserted.mpc_wallet_id,
+        status: inserted.status,
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'IMPORT_FAILED' });
+  } finally {
+    // Zero out sensitive key material from memory immediately
+    if (req.body) {
+      delete req.body.mnemonic;
+      delete req.body.privateKey;
+    }
+  }
+});
+
+// GET /wallet/me - returns authenticated user, active wallet, passkeys, agent clients, and next step
 app.get('/wallet/me', requireSession, async (req: Request, res: Response) => {
   const userId = req.session!.userId;
   try {
     const { data: passkeys } = await supabase
       .from('passkeys')
-      .select('id, credential_id, counter, created_at, last_used_at')
+      .select('id, credential_id, counter, wallet_ids, created_at, last_used_at')
       .eq('user_id', userId);
 
     const { data: agents } = await supabase
@@ -1558,6 +1718,8 @@ app.get('/wallet/me', requireSession, async (req: Request, res: Response) => {
       .eq('user_id', userId)
       .eq('status', 'active');
 
+    const next = await nextStep(userId);
+
     return res.json({
       authenticated: true,
       user: req.session!.user,
@@ -1565,6 +1727,7 @@ app.get('/wallet/me', requireSession, async (req: Request, res: Response) => {
       wallets: wallets || [],
       passkeys: passkeys || [],
       agents: agents || [],
+      next,
     });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
@@ -1595,8 +1758,8 @@ app.get(['/wallet/approvals/pending', '/api/v1/dashboard/approvals/pending'], as
   }
 });
 
-// POST /api/v1/dashboard/approvals/:id/approve -> alias to approval execution
-app.post('/api/v1/dashboard/approvals/:id/approve', async (req: Request, res: Response) => {
+// POST /api/v1/dashboard/approvals/:id/approve & POST /api/approvals/:id/complete
+const handleApprovalExecution = async (req: Request, res: Response) => {
   const approvalId = req.params.id;
   const { passkeyAssertion, assertionResponse, credentialId } = req.body;
   const assertion = assertionResponse || passkeyAssertion;
@@ -1606,6 +1769,20 @@ app.post('/api/v1/dashboard/approvals/:id/approve', async (req: Request, res: Re
     const ticket = getApproval(approvalId);
     if (!ticket) {
       return res.status(404).json({ error: 'UNKNOWN_APPROVAL' });
+    }
+
+    // Passkey must be authorized for this wallet: passkeys.wallet_ids must include ticket.wallet_id
+    if (credId) {
+      const passkeyRecord = await findPasskeyByCredentialId(credId);
+      if (passkeyRecord) {
+        const allowedWallets = Array.isArray(passkeyRecord.wallet_ids) ? passkeyRecord.wallet_ids : [];
+        if (ticket.walletId && !allowedWallets.includes(ticket.walletId)) {
+          return res.status(403).json({
+            error: 'UNAUTHORIZED_PASSKEY_FOR_WALLET',
+            message: 'This passkey credential is not authorized for the requested wallet.',
+          });
+        }
+      }
     }
 
     await consumeApproval(approvalId, ticket.payloadHash);
@@ -1657,7 +1834,10 @@ app.post('/api/v1/dashboard/approvals/:id/approve', async (req: Request, res: Re
   } catch (err: any) {
     return res.status(400).json({ error: err.message || 'Approval execution failed' });
   }
-});
+};
+
+app.post('/api/v1/dashboard/approvals/:id/approve', handleApprovalExecution);
+app.post('/api/approvals/:id/complete', handleApprovalExecution);
 
 // -------------------------------------------------------------
 // OpenAPI 3.0.3 Specification (GET /openapi.json)

@@ -1,4 +1,5 @@
 import { ethers } from 'ethers';
+import crypto from 'node:crypto';
 import { canonicalPayloadHash } from '../policy/grantEngine.js';
 
 export interface SignRequest {
@@ -29,6 +30,7 @@ export interface SignResult {
 
 export interface MpcProvider {
   createWallet(userId: string): Promise<{ mpcWalletId: string; address: string }>;
+  importWallet?(userId: string, input: { mnemonic?: string; privateKey?: string }): Promise<{ mpcWalletId: string; address: string }>;
   signAndBroadcast(req: SignRequest): Promise<SignResult>;
 }
 
@@ -181,9 +183,26 @@ function devMockProvider(): MpcProvider {
 
   return {
     async createWallet() {
+      const mockWallet = ethers.Wallet.createRandom();
       return {
         mpcWalletId: 'mock-mpc-wallet-' + crypto.randomUUID().replace(/-/g, '').slice(0, 12),
-        address: '0x1111111111111111111111111111111111111111',
+        address: mockWallet.address.toLowerCase(),
+      };
+    },
+    async importWallet(_userId: string, input: { mnemonic?: string; privateKey?: string }) {
+      let addr = ethers.Wallet.createRandom().address.toLowerCase();
+      if (input.privateKey) {
+        try {
+          addr = new ethers.Wallet(input.privateKey.startsWith('0x') ? input.privateKey : '0x' + input.privateKey).address.toLowerCase();
+        } catch {}
+      } else if (input.mnemonic) {
+        try {
+          addr = ethers.HDNodeWallet.fromPhrase(input.mnemonic.trim()).address.toLowerCase();
+        } catch {}
+      }
+      return {
+        mpcWalletId: 'mock-imported-mpc-' + crypto.randomUUID().replace(/-/g, '').slice(0, 12),
+        address: addr,
       };
     },
     async signAndBroadcast(req: SignRequest) {
