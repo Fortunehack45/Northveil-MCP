@@ -8,7 +8,7 @@ import { getTransactionStatus } from './tools/getTransactionStatus.js';
 import { consumeApproval, getApproval, getApprovalAsync } from './wallet/approvals.js';
 import { verifyPasskeyForPayload } from './auth/passkey.js';
 import { getMpcProvider } from './wallet/mpcAdapter.js';
-import { submitIntent, getRequest, loadRequest, updateRequest, insertSignPermit } from './wallet/requestLifecycle.js';
+import { submitIntent, getRequest, loadRequest, updateRequest, insertSignPermit, signAndAdvance } from './wallet/requestLifecycle.js';
 import { setAutonomousMode } from './tools/setAutonomousMode.js';
 import { issueClientKey } from './auth/agentClient.js';
 import { supabase } from './supabase.js';
@@ -1103,6 +1103,22 @@ async function handleApprovalCompletion(req: Request, res: Response) {
       }
     }
 
+    // 3b. Verify passkey credential is authorized for this wallet
+    const assertion = assertionResponse || req.body?.passkeyAssertion;
+    const credId = credentialId || assertion?.id || assertion?.credentialId;
+    if (credId) {
+      const passkeyRecord = await findPasskeyByCredentialId(credId);
+      if (passkeyRecord) {
+        const allowedWallets = Array.isArray(passkeyRecord.wallet_ids) ? passkeyRecord.wallet_ids : [];
+        if (ticket.walletId && !allowedWallets.includes(ticket.walletId)) {
+          return res.status(403).json({
+            error: 'UNAUTHORIZED_PASSKEY_FOR_WALLET',
+            message: 'This passkey credential is not authorized for the requested wallet.',
+          });
+        }
+      }
+    }
+
     // 4. Consume ticket (enforces single use, expiry, payload hash)
     await consumeApproval(approvalId, ticket.payloadHash);
 
@@ -1130,38 +1146,47 @@ async function handleApprovalCompletion(req: Request, res: Response) {
       });
     }
 
-    // 6. Request lifecycle transitions: pending_approval -> pending_signature
+    // 5b. Verify wallet has an MPC signer bound (Section 4.1: remove 'turnkey_wallet' fallback)
+    let boundMpcWalletId: string | undefined;
+    const { data: w } = await supabase
+      .from('wallets')
+      .select('mpc_wallet_id')
+      .eq('id', ticket.walletId)
+      .maybeSingle();
+
+    if (w?.mpc_wallet_id) {
+      boundMpcWalletId = w.mpc_wallet_id;
+    } else {
+      const reqRec = await loadRequest(approvalId);
+      if (reqRec?.mpc_wallet_id) {
+        boundMpcWalletId = reqRec.mpc_wallet_id;
+      }
+    }
+
+    if (!boundMpcWalletId) {
+      return res.status(409).json({ error: 'SIGNER_NOT_BOUND' });
+    }
+
+    // 6. Insert single-use sign permit only after passkey verification succeeds
+    await insertSignPermit(boundMpcWalletId, ticket.payloadHash);
+
+    // 7. Request lifecycle transition: pending_approval -> pending_signature
     await updateRequest(approvalId, { status: 'pending_signature' });
 
-    // 7. Insert single-use sign permit so assertSignPermit passes
-    await insertSignPermit(ticket.walletId || 'turnkey-wallet', ticket.payloadHash);
-
     // 8. Threshold sign exact canonical bytes with Turnkey MPC provider
-    const mpc = getMpcProvider();
-    const signResult = await mpc.signAndBroadcast({
-      mpcWalletId: ticket.walletId || 'turnkey-wallet',
-      unsignedTx: ticket.canonicalTx as any,
-      payloadHash: ticket.payloadHash,
-      approvalEvidence: { type: 'passkey', approvalId: ticket.id },
-    });
-
-    // 9. Advance request to terminal success
-    await updateRequest(approvalId, {
-      status: 'success',
-      tx_hash: signResult.txHash,
-    });
+    const out = await signAndAdvance(approvalId, 'passkey');
 
     await logAudit({
       userId: ticket.userId || 'anonymous',
       walletAddress: ticket.walletAddress,
       clientId: ticket.clientId,
       action: 'APPROVAL_EXECUTED_PASSKEY',
-      details: { approvalId, txHash: signResult.txHash },
+      details: { approvalId, txHash: out.txHash },
     });
 
     return res.json({
       status: 'success',
-      txHash: signResult.txHash,
+      txHash: out.txHash,
       approvalId,
       requestId: approvalId,
     });
@@ -1182,7 +1207,7 @@ async function handleApprovalCompletion(req: Request, res: Response) {
   }
 }
 
-app.post(['/api/approvals/:id/complete', '/wallet/approvals/:id/complete'], handleApprovalCompletion);
+app.post(['/api/approvals/:id/complete', '/wallet/approvals/:id/complete', '/api/v1/dashboard/approvals/:id/approve'], handleApprovalCompletion);
 
 // -------------------------------------------------------------
 // Request Lifecycle Inspection (GET /wallet/requests/:id)
@@ -1223,14 +1248,6 @@ app.get('/wallet/requests/:id', async (req: Request, res: Response) => {
 // -------------------------------------------------------------
 // Live Wallet & Session Endpoints
 // -------------------------------------------------------------
-
-// GET /wallet/me - authenticated user profile and active wallet
-app.get('/wallet/me', requireSession, async (req: Request, res: Response) => {
-  res.json({
-    user: req.session!.user,
-    wallet: req.session!.wallet || null,
-  });
-});
 
 // GET /wallet/portfolio - multi-chain balance rollup for user's wallet
 app.get('/wallet/portfolio', requireSession, async (req: Request, res: Response) => {
@@ -1494,32 +1511,7 @@ app.get('/auth/google/callback', async (req: Request, res: Response) => {
     const callbackUrl = getGoogleCallbackUrl(req);
     const userInfo = await exchangeGoogleCode(code, '', callbackUrl);
     const user = await upsertGoogleUser(userInfo);
-
-    const { data: existingWallet } = await supabase
-      .from('wallets')
-      .select('*')
-      .eq('user_id', user.id)
-      .eq('status', 'active')
-      .maybeSingle();
-
-    if (!existingWallet) {
-      try {
-        const mpc = getMpcProvider();
-        const created = await mpc.createWallet(user.id);
-        await supabase.from('wallets').insert({
-          user_id: user.id,
-          address: created.address,
-          chain_family: 'evm',
-          mpc_provider: 'turnkey',
-          mpc_wallet_id: created.mpcWalletId,
-          status: 'active',
-        });
-      } catch (mpcErr: any) {
-        console.warn('[Northveil] MPC wallet provision error:', mpcErr.message);
-      }
-    }
-
-    const sessionToken = signSessionToken({ userId: user.id, email: user.email });
+    const sessionToken = signSessionToken({ userId: user.id, email: user.email, passkeyOk: false });
     const isProd = process.env.NODE_ENV === 'production';
     res.cookie('nv_session', sessionToken, {
       httpOnly: true,
@@ -1723,16 +1715,12 @@ app.post('/auth/passkey/login/finish', async (req: Request, res: Response) => {
 app.post('/wallet/create', requireSession, async (req: Request, res: Response) => {
   const userId = req.session!.userId;
   try {
-    const { data: existing } = await supabase
+    const { count } = await supabase
       .from('wallets')
-      .select('*')
+      .select('id', { count: 'exact', head: true })
       .eq('user_id', userId)
-      .eq('status', 'active')
-      .maybeSingle();
-
-    if (existing) {
-      return res.json({ address: existing.address, wallet: existing });
-    }
+      .eq('status', 'active');
+    const isPrimary = (count === 0);
 
     const mpc = getMpcProvider();
     const created = await mpc.createWallet(userId);
@@ -1741,7 +1729,8 @@ app.post('/wallet/create', requireSession, async (req: Request, res: Response) =
       .from('wallets')
       .insert({
         user_id: userId,
-        name: req.body?.name || 'Primary Vault',
+        name: req.body?.name || (isPrimary ? 'Primary Vault' : 'Secondary Vault'),
+        is_primary: isPrimary,
         address: created.address.toLowerCase(),
         chain_family: 'evm',
         mpc_provider: 'turnkey',
@@ -1774,14 +1763,107 @@ app.post('/wallet/create', requireSession, async (req: Request, res: Response) =
       console.warn('[Northveil] Error linking wallet to passkeys:', linkErr.message);
     }
 
-    return res.status(201).json({ address: inserted.address, wallet: inserted });
+    return res.status(201).json({
+      address: inserted.address,
+      id: inserted.id,
+      mpcWalletId: inserted.mpc_wallet_id,
+      wallet: inserted,
+    });
   } catch (err: any) {
     console.error('[Northveil] /wallet/create error:', err);
     return res.status(500).json({ error: err.message || 'WALLET_CREATION_FAILED' });
   }
 });
 
-// POST /wallet/import - Enclave import into MPC (Drop mnemonic immediately; never log it)
+// POST /wallet/import/begin - Enclave import begin (returns Turnkey importBundle TEK public)
+app.post('/wallet/import/begin', requireSession, async (req: Request, res: Response) => {
+  const userId = req.session!.userId;
+  try {
+    const mpc = getMpcProvider();
+    if (typeof mpc.importBegin !== 'function') {
+      return res.status(501).json({ error: 'IMPORT_NOT_SUPPORTED', message: 'Signer provider does not support importBegin' });
+    }
+    const result = await mpc.importBegin(userId);
+    return res.json({ ok: true, ...result });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'IMPORT_BEGIN_FAILED' });
+  }
+});
+
+// POST /wallet/import/finish - Enclave import finish (receives encryptedBundle only. Server never sees mnemonic)
+app.post('/wallet/import/finish', requireSession, async (req: Request, res: Response) => {
+  const userId = req.session!.userId;
+  const { encryptedBundle, name } = req.body || {};
+
+  if (!encryptedBundle || typeof encryptedBundle !== 'string') {
+    return res.status(400).json({ error: 'ENCRYPTED_BUNDLE_REQUIRED' });
+  }
+
+  try {
+    const mpc = getMpcProvider();
+    if (typeof mpc.importFinish !== 'function') {
+      return res.status(501).json({ error: 'IMPORT_NOT_SUPPORTED', message: 'Signer provider does not support importFinish' });
+    }
+
+    const imported = await mpc.importFinish(userId, { encryptedBundle, name });
+
+    const { count } = await supabase
+      .from('wallets')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .eq('status', 'active');
+    const isPrimary = (count === 0);
+
+    const { data: inserted, error } = await supabase
+      .from('wallets')
+      .insert({
+        user_id: userId,
+        name: name || (isPrimary ? 'Primary Vault' : 'Imported Vault'),
+        is_primary: isPrimary,
+        address: imported.address.toLowerCase(),
+        chain_family: 'evm',
+        mpc_provider: 'turnkey',
+        mpc_wallet_id: imported.mpcWalletId,
+        status: 'active',
+      })
+      .select('*')
+      .single();
+
+    if (error) throw error;
+
+    // Link passkey to wallet: append wallet.id to passkeys.wallet_ids for this user
+    try {
+      const { data: userPasskeys } = await supabase
+        .from('passkeys')
+        .select('id, wallet_ids')
+        .eq('user_id', userId);
+      if (userPasskeys && userPasskeys.length > 0) {
+        for (const pk of userPasskeys) {
+          const currentIds = Array.isArray(pk.wallet_ids) ? pk.wallet_ids : [];
+          if (!currentIds.includes(inserted.id)) {
+            await supabase
+              .from('passkeys')
+              .update({ wallet_ids: [...currentIds, inserted.id] })
+              .eq('id', pk.id);
+          }
+        }
+      }
+    } catch (linkErr: any) {
+      console.warn('[Northveil] Error linking wallet to passkeys:', linkErr.message);
+    }
+
+    return res.status(201).json({
+      address: inserted.address,
+      id: inserted.id,
+      mpcWalletId: inserted.mpc_wallet_id,
+      wallet: inserted,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'IMPORT_FINISH_FAILED' });
+  }
+});
+
+// POST /wallet/import - Temporary fallback import over TLS (Zeroes memory immediately, never logs mnemonic)
 app.post('/wallet/import', requireSession, async (req: Request, res: Response) => {
   const userId = req.session!.userId;
   const { name, mnemonic, privateKey } = req.body || {};
@@ -1830,6 +1912,7 @@ app.post('/wallet/import', requireSession, async (req: Request, res: Response) =
       }
       return res.status(201).json({
         address: existingWallet.address,
+        id: existingWallet.id,
         mpcWalletId: existingWallet.mpc_wallet_id,
         wallet: {
           id: existingWallet.id,
@@ -1847,14 +1930,15 @@ app.post('/wallet/import', requireSession, async (req: Request, res: Response) =
     const { count } = await supabase
       .from('wallets')
       .select('id', { count: 'exact', head: true })
-      .eq('user_id', userId);
+      .eq('user_id', userId)
+      .eq('status', 'active');
     const isPrimary = (count === 0);
 
     const { data: inserted, error } = await supabase
       .from('wallets')
       .insert({
         user_id: userId,
-        name: name || 'Imported Vault',
+        name: name || (isPrimary ? 'Primary Vault' : 'Imported Vault'),
         is_primary: isPrimary,
         address: imported.address.toLowerCase(),
         chain_family: 'evm',
@@ -1891,6 +1975,7 @@ app.post('/wallet/import', requireSession, async (req: Request, res: Response) =
     // Return address and mpcWalletId ONLY. Never echo mnemonic or private key!
     return res.status(201).json({
       address: inserted.address,
+      id: inserted.id,
       mpcWalletId: inserted.mpc_wallet_id,
       wallet: {
         id: inserted.id,
@@ -1907,44 +1992,56 @@ app.post('/wallet/import', requireSession, async (req: Request, res: Response) =
   } finally {
     // Zero out sensitive key material from memory immediately
     if (req.body) {
+      req.body.mnemonic = '';
+      req.body.privateKey = '';
       delete req.body.mnemonic;
       delete req.body.privateKey;
     }
   }
 });
 
-// GET /wallet/me - returns authenticated user, active wallet, passkeys, agent clients, and next step
+// GET /wallet/me - canonical authenticated user profile, active wallets, passkeys count, and next onboarding state
 app.get('/wallet/me', requireSession, async (req: Request, res: Response) => {
   const userId = req.session!.userId;
   try {
-    const { data: passkeys } = await supabase
-      .from('passkeys')
-      .select('id, credential_id, counter, wallet_ids, created_at, last_used_at')
-      .eq('user_id', userId);
-
-    const { data: agents } = await supabase
-      .from('agent_clients')
-      .select('id, name, status, created_at')
-      .eq('user_id', userId);
+    let user = req.session!.user;
+    const { data: dbUser } = await supabase
+      .from('users')
+      .select('id, email, name, avatar_url')
+      .eq('id', userId)
+      .maybeSingle();
+    if (dbUser) {
+      user = { id: dbUser.id, email: dbUser.email, name: dbUser.name, avatarUrl: dbUser.avatar_url };
+    }
 
     const { data: wallets } = await supabase
       .from('wallets')
-      .select('id, name, is_primary, address, chain_family, mpc_provider, mpc_wallet_id, status, created_at')
-      .eq('user_id', userId)
+      .select('id, name, address, chain_family, mpc_wallet_id, is_primary, status')
+      .eq('user_id', user.id)
       .eq('status', 'active')
-      .order('is_primary', { ascending: false })
-      .order('created_at', { ascending: true });
+      .order('is_primary', { ascending: false });
 
-    const next = await nextStep(userId);
+    const { count: passkeyCount } = await supabase
+      .from('passkeys')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', user.id);
+
+    const safeWallets = wallets ?? [];
+    const safePasskeyCount = passkeyCount ?? 0;
+
+    const next =
+      safeWallets.length === 0 && safePasskeyCount === 0 ? 'enroll_passkey' :
+      safeWallets.length === 0 ? 'create_or_import' :
+      safePasskeyCount === 0 ? 'enroll_passkey' :
+      'unlock_passkey';
 
     return res.json({
-      authenticated: true,
-      user: req.session!.user,
-      wallet: req.session!.wallet || (wallets && wallets.find((w: any) => w.is_primary)) || (wallets && wallets[0]) || null,
-      wallets: wallets || [],
-      passkeys: passkeys || [],
-      agents: agents || [],
+      user: { id: user.id, email: user.email },
+      wallets: safeWallets,
+      passkeyCount: safePasskeyCount,
       next,
+      wallet: safeWallets[0] || null,
+      authenticated: true,
     });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
@@ -1974,87 +2071,6 @@ app.get(['/wallet/approvals/pending', '/api/v1/dashboard/approvals/pending'], as
     return res.status(500).json({ error: err.message });
   }
 });
-
-// POST /api/v1/dashboard/approvals/:id/approve & POST /api/approvals/:id/complete
-const handleApprovalExecution = async (req: Request, res: Response) => {
-  const approvalId = req.params.id;
-  const { passkeyAssertion, assertionResponse, credentialId } = req.body;
-  const assertion = assertionResponse || passkeyAssertion;
-  const credId = credentialId || assertion?.id || assertion?.credentialId;
-
-  try {
-    const ticket = getApproval(approvalId);
-    if (!ticket) {
-      return res.status(404).json({ error: 'UNKNOWN_APPROVAL' });
-    }
-
-    // Passkey must be authorized for this wallet: passkeys.wallet_ids must include ticket.wallet_id
-    if (credId) {
-      const passkeyRecord = await findPasskeyByCredentialId(credId);
-      if (passkeyRecord) {
-        const allowedWallets = Array.isArray(passkeyRecord.wallet_ids) ? passkeyRecord.wallet_ids : [];
-        if (ticket.walletId && !allowedWallets.includes(ticket.walletId)) {
-          return res.status(403).json({
-            error: 'UNAUTHORIZED_PASSKEY_FOR_WALLET',
-            message: 'This passkey credential is not authorized for the requested wallet.',
-          });
-        }
-      }
-    }
-
-    await consumeApproval(approvalId, ticket.payloadHash);
-
-    if (process.env.NODE_ENV === 'production' && assertion && credId) {
-      const { data: passkeyRecord } = await supabase
-        .from('passkeys')
-        .select('*')
-        .eq('credential_id', credId)
-        .eq('user_id', ticket.userId)
-        .single();
-
-      if (passkeyRecord) {
-        await verifyPasskeyForPayload({
-          response: assertion,
-          expectedChallenge: Buffer.from(ticket.payloadHash.replace(/^0x/, ''), 'hex').toString('base64url'),
-          storedAuthenticator: {
-            credentialID: Buffer.from(passkeyRecord.credential_id, 'base64url'),
-            credentialPublicKey: Buffer.from(passkeyRecord.credential_public_key),
-            counter: Number(passkeyRecord.counter),
-          },
-        });
-      }
-    }
-
-    const mpc = getMpcProvider();
-    const signResult = await mpc.signAndBroadcast({
-      mpcWalletId: ticket.walletId || 'turnkey-wallet',
-      unsignedTx: ticket.canonicalTx as any,
-      payloadHash: ticket.payloadHash,
-      approvalEvidence: { type: 'passkey', approvalId: ticket.id },
-    });
-
-    await logAudit({
-      userId: ticket.userId,
-      walletAddress: ticket.walletAddress,
-      clientId: ticket.clientId,
-      action: 'APPROVAL_EXECUTED_PASSKEY',
-      details: { approvalId, txHash: signResult.txHash },
-    });
-
-    return res.json({
-      success: true,
-      status: 'EXECUTED',
-      txHash: signResult.txHash,
-      tx_hash: signResult.txHash,
-      approvalId,
-    });
-  } catch (err: any) {
-    return res.status(400).json({ error: err.message || 'Approval execution failed' });
-  }
-};
-
-app.post('/api/v1/dashboard/approvals/:id/approve', handleApprovalExecution);
-app.post('/api/approvals/:id/complete', handleApprovalExecution);
 
 // -------------------------------------------------------------
 // OpenAPI 3.0.3 Specification (GET /openapi.json)

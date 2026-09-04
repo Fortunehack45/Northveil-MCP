@@ -20,6 +20,7 @@ export interface AgentRequest {
   user_id: string;
   grant_id?: string;
   wallet_id: string;
+  mpc_wallet_id?: string;
   tool: string;
   intent: Record<string, any>;
   canonical_tx: Record<string, any>;
@@ -40,27 +41,33 @@ export const inMemorySignPermits = new Map<string, { id: string; mpcWalletId: st
 /**
  * Creates a single-use sign permit row for (mpc_wallet_id, payload_hash)
  */
-export async function insertSignPermit(mpcWalletId: string, payloadHash: string, ttlMs = 10 * 60 * 1000): Promise<string> {
-  const permitId = crypto.randomUUID();
+export async function insertSignPermit(
+  mpcWalletId: string,
+  payloadHash: string,
+  ttlMs = 5 * 60 * 1000
+): Promise<string> {
+  const permitId = 'perm_' + crypto.randomBytes(16).toString('hex');
   const expiresAt = new Date(Date.now() + ttlMs);
-  const cacheKey = `${mpcWalletId}:${payloadHash}`;
 
-  inMemorySignPermits.set(cacheKey, {
+  inMemorySignPermits.set(`${mpcWalletId}:${payloadHash}`, {
     id: permitId,
     mpcWalletId,
     payloadHash,
     expiresAt,
   });
 
-  try {
-    await supabase.from('sign_permits').insert({
-      id: permitId,
-      mpc_wallet_id: mpcWalletId,
-      payload_hash: payloadHash,
-      expires_at: expiresAt.toISOString(),
-    });
-  } catch (err) {
-    // Non-fatal if offline/mock
+  const { error: insertError } = await supabase.from('sign_permits').insert({
+    id: permitId,
+    mpc_wallet_id: mpcWalletId,
+    payload_hash: payloadHash,
+    expires_at: expiresAt.toISOString(),
+  });
+
+  if (insertError) {
+    const isHosted = process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL) || process.env.NORTHVEIL_HOSTED === '1';
+    if (isHosted) {
+      throw new Error(`SIGN_PERMIT_PERSISTENCE_FAILED: ${insertError.message}`);
+    }
   }
 
   return permitId;
@@ -78,6 +85,13 @@ export async function assertSignPermit(mpcWalletId: string, payloadHash: string)
   const cached = inMemorySignPermits.get(cacheKey);
   if (cached) {
     inMemorySignPermits.delete(cacheKey);
+    try {
+      await supabase
+        .from('sign_permits')
+        .delete()
+        .eq('mpc_wallet_id', mpcWalletId)
+        .eq('payload_hash', payloadHash);
+    } catch {}
     if (cached.expiresAt > new Date()) {
       return;
     }
@@ -377,6 +391,7 @@ export async function submitIntent(
     user_id: ctx.userId,
     grant_id: (ctx.grant as any)?.id,
     wallet_id: wallet.id,
+    mpc_wallet_id: (wallet as any).mpcWalletId || (wallet as any).mpc_wallet_id,
     tool,
     intent: args,
     canonical_tx: built.unsignedTx,
@@ -423,8 +438,28 @@ export async function submitIntent(
   }
 
   if (isAutonomous) {
-    // Autonomous execution: sign and advance immediately
+    // Autonomous execution: verify signer bound, insert permit, advance to pending_signature, then sign
     try {
+      let mpcWalletId = (wallet as any)?.mpc_wallet_id || (wallet as any)?.mpcWalletId;
+      if (!mpcWalletId) {
+        const { data: w } = await supabase
+          .from('wallets')
+          .select('mpc_wallet_id')
+          .eq('id', wallet.id)
+          .maybeSingle();
+        if (w?.mpc_wallet_id) {
+          mpcWalletId = w.mpc_wallet_id;
+        }
+      }
+
+      if (!mpcWalletId) {
+        throw new Error('SIGNER_NOT_BOUND: Autonomous wallet has no mpc_wallet_id');
+      }
+
+      // Insert permit strictly after evaluateGrant passed allow_autonomous
+      await insertSignPermit(mpcWalletId, payloadHash);
+      await updateRequest(requestId, { status: 'pending_signature' });
+
       const outcome = await signAndAdvance(requestId, (ctx.grant as any)?.mode || 'autonomous');
       return {
         requestId,
@@ -491,7 +526,8 @@ export async function getRequest(requestId: string): Promise<{
 }
 
 /**
- * Executes threshold MPC signature and on-chain broadcast
+ * Executes threshold MPC signature and on-chain broadcast.
+ * ONLY consumes pre-existing sign permits. NEVER inserts its own permit.
  */
 export async function signAndAdvance(
   requestId: string,
@@ -501,8 +537,8 @@ export async function signAndAdvance(
   if (!req) throw new Error('REQUEST_NOT_FOUND');
   if (req.status !== 'pending_signature') throw new Error('NOT_SIGNABLE: Request status is not pending_signature');
 
-  // Load wallet for this request
-  let mpcWalletId = 'turnkey_wallet';
+  // Load wallet for this request - NO FALLBACK to turnkey_wallet!
+  let mpcWalletId: string | undefined;
   try {
     const { data: walletData } = await supabase
       .from('wallets')
@@ -514,8 +550,17 @@ export async function signAndAdvance(
     }
   } catch {}
 
-  // If autonomous grant or permit not pre-inserted, insert single-use permit now
-  await insertSignPermit(mpcWalletId, req.payload_hash);
+  if (!mpcWalletId && req.mpc_wallet_id) {
+    mpcWalletId = req.mpc_wallet_id;
+  }
+
+  if (!mpcWalletId) {
+    throw new Error('SIGNER_NOT_BOUND: Wallet row has no mpc_wallet_id');
+  }
+
+  // Consume single-use permit. If missing or already used -> throws NO_SIGN_PERMIT!
+  // DO NOT insert permit here!
+  await assertSignPermit(mpcWalletId, req.payload_hash);
 
   const provider = getMpcProvider();
   const signed = await provider.signAndBroadcast({

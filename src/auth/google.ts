@@ -1,4 +1,5 @@
 import { supabase } from '../supabase.js';
+import { upsertIdentity } from './emailOtp.js';
 
 export interface GoogleUserInfo {
   sub: string;
@@ -73,40 +74,24 @@ export async function exchangeGoogleCode(
 }
 
 /**
- * Upserts a verified Google user into public.users using google_sub
+ * Upserts a verified Google user into public.users using canonical upsertIdentity
  */
 export async function upsertGoogleUser(info: GoogleUserInfo): Promise<UserRecord> {
-  const email = info.email.toLowerCase().trim();
-  const now = new Date();
-
-  const { data, error } = await supabase
-    .from('users')
-    .upsert(
-      {
-        google_sub: info.sub,
-        email,
-        email_verified: info.email_verified,
-        name: info.name || null,
-        avatar_url: info.picture || null,
-        last_login_at: now.toISOString(),
-      },
-      { onConflict: 'google_sub' }
-    )
-    .select('*')
-    .single();
-
-  if (error || !data) {
-    throw new Error(`Failed to upsert user record: ${error?.message}`);
-  }
+  const user = await upsertIdentity({
+    email: info.email,
+    googleSub: info.sub,
+    name: info.name,
+    avatarUrl: info.picture,
+  });
 
   return {
-    id: data.id,
-    email: data.email,
-    emailVerified: data.email_verified,
-    googleSub: data.google_sub,
-    name: data.name,
-    avatarUrl: data.avatar_url,
-    createdAt: new Date(data.created_at),
-    lastLoginAt: new Date(data.last_login_at),
+    id: user.id,
+    email: user.email,
+    emailVerified: user.email_verified ?? true,
+    googleSub: user.google_sub,
+    name: user.name,
+    avatarUrl: user.avatar_url,
+    createdAt: new Date(user.created_at || Date.now()),
+    lastLoginAt: new Date(user.last_login_at || Date.now()),
   };
 }

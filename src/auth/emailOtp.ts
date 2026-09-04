@@ -169,46 +169,80 @@ export async function nextStep(userId: string): Promise<'unlock_passkey' | 'enro
 }
 
 /**
- * Upserts a user by verified email address
+ * Canonical identity upsert merging Google and email identities into a single user row
  */
-export async function upsertUserByEmail(email: string) {
-  const norm = email.toLowerCase().trim();
-  const now = new Date().toISOString();
+export async function upsertIdentity(opts: {
+  email: string;
+  googleSub?: string;
+  name?: string;
+  avatarUrl?: string;
+}) {
+  const email = opts.email.trim().toLowerCase();
 
-  const { data: existing } = await supabase
-    .from('users')
-    .select('*')
-    .eq('email', norm)
-    .maybeSingle();
+  const { data: byEmail } = await supabase.from("users").select("*").ilike("email", email).maybeSingle();
+  const { data: bySub } = opts.googleSub
+    ? await supabase.from("users").select("*").eq("google_sub", opts.googleSub).maybeSingle()
+    : { data: null };
 
-  if (existing) {
-    const { data: updated, error } = await supabase
-      .from('users')
-      .update({
-        email_verified: true,
-        email_verified_at: now,
-        last_login_at: now,
-      })
-      .eq('id', existing.id)
-      .select('*')
-      .single();
-    if (error) throw error;
-    return updated;
+  if (byEmail && bySub && byEmail.id !== bySub.id) {
+    await supabase.from("wallets").update({ user_id: byEmail.id }).eq("user_id", bySub.id);
+    await supabase.from("passkeys").update({ user_id: byEmail.id }).eq("user_id", bySub.id);
+    await supabase.from("agent_clients").update({ user_id: byEmail.id }).eq("user_id", bySub.id);
+    await supabase.from("users").delete().eq("id", bySub.id);
+    await supabase.from("users").update({
+      google_sub: opts.googleSub,
+      email_verified: true,
+      email_verified_at: new Date().toISOString(),
+      name: opts.name ?? byEmail.name,
+      avatar_url: opts.avatarUrl ?? byEmail.avatar_url,
+      last_login_at: new Date().toISOString(),
+    }).eq("id", byEmail.id);
+    return { ...byEmail, google_sub: opts.googleSub };
   }
 
-  const { data: created, error } = await supabase
-    .from('users')
-    .insert({
-      email: norm,
+  if (byEmail) {
+    await supabase.from("users").update({
+      google_sub: opts.googleSub ?? byEmail.google_sub,
       email_verified: true,
-      email_verified_at: now,
-      last_login_at: now,
-    })
-    .select('*')
-    .single();
+      email_verified_at: new Date().toISOString(),
+      last_login_at: new Date().toISOString(),
+      name: opts.name ?? byEmail.name,
+      avatar_url: opts.avatarUrl ?? byEmail.avatar_url,
+    }).eq("id", byEmail.id);
+    return byEmail;
+  }
+
+  if (bySub) {
+    await supabase.from("users").update({
+      email,
+      email_verified: true,
+      email_verified_at: new Date().toISOString(),
+      last_login_at: new Date().toISOString(),
+      name: opts.name ?? bySub.name,
+      avatar_url: opts.avatarUrl ?? bySub.avatar_url,
+    }).eq("id", bySub.id);
+    return { ...bySub, email };
+  }
+
+  const { data: created, error } = await supabase.from("users").insert({
+    email,
+    google_sub: opts.googleSub ?? null,
+    name: opts.name ?? null,
+    avatar_url: opts.avatarUrl ?? null,
+    email_verified: true,
+    email_verified_at: new Date().toISOString(),
+    last_login_at: new Date().toISOString(),
+  }).select("*").single();
 
   if (error) throw error;
   return created;
+}
+
+/**
+ * Upserts a user by verified email address
+ */
+export async function upsertUserByEmail(email: string) {
+  return upsertIdentity({ email });
 }
 
 /**

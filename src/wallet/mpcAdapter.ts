@@ -1,7 +1,6 @@
 import { ethers } from 'ethers';
 import crypto from 'node:crypto';
 import { canonicalPayloadHash } from '../policy/grantEngine.js';
-import { assertSignPermit } from './requestLifecycle.js';
 
 export interface SignRequest {
   mpcWalletId: string;
@@ -31,6 +30,8 @@ export interface SignResult {
 
 export interface MpcProvider {
   createWallet(userId: string): Promise<{ mpcWalletId: string; address: string }>;
+  importBegin?(userId: string): Promise<{ importBundle: string; organizationId: string; userId: string }>;
+  importFinish?(userId: string, input: { encryptedBundle: string; name?: string }): Promise<{ mpcWalletId: string; address: string }>;
   importWallet?(userId: string, input: { mnemonic?: string; privateKey?: string }): Promise<{ mpcWalletId: string; address: string }>;
   signAndBroadcast(req: SignRequest): Promise<SignResult>;
 }
@@ -95,6 +96,103 @@ function turnkeyProvider(): MpcProvider {
 
       if (!address || !mpcWalletId) {
         throw new Error('Turnkey failed to provision wallet account');
+      }
+
+      return { mpcWalletId, address };
+    },
+
+    async importBegin(userId: string) {
+      const { TurnkeyClient } = await import('@turnkey/http');
+      const { ApiKeyStamper } = await import('@turnkey/api-key-stamper');
+
+      const stamper = new ApiKeyStamper({
+        apiPublicKey: process.env.TURNKEY_API_PUBLIC_KEY!,
+        apiPrivateKey: process.env.TURNKEY_API_PRIVATE_KEY!,
+      });
+
+      const client = new TurnkeyClient(
+        { baseUrl: process.env.TURNKEY_BASE_URL || 'https://api.turnkey.com' },
+        stamper
+      );
+
+      const organizationId = process.env.TURNKEY_ORGANIZATION_ID!;
+      const whoami = await client.getWhoami({ organizationId });
+      const turnkeyUserId = whoami.userId;
+
+      const initResp = await client.initImportWallet({
+        type: 'ACTIVITY_TYPE_INIT_IMPORT_WALLET',
+        organizationId,
+        parameters: {
+          userId: turnkeyUserId,
+        },
+        timestampMs: String(Date.now()),
+      });
+
+      const pollInit = await client.getActivity({
+        organizationId,
+        activityId: initResp.activity.id,
+      });
+
+      const importBundle = (pollInit.activity.result as any)?.initImportWalletResult?.importBundle;
+      if (!importBundle) {
+        throw new Error('Failed to initialize enclave wallet import bundle');
+      }
+
+      return {
+        importBundle,
+        organizationId,
+        userId: turnkeyUserId,
+      };
+    },
+
+    async importFinish(userId: string, input: { encryptedBundle: string; name?: string }) {
+      const { TurnkeyClient } = await import('@turnkey/http');
+      const { ApiKeyStamper } = await import('@turnkey/api-key-stamper');
+
+      const stamper = new ApiKeyStamper({
+        apiPublicKey: process.env.TURNKEY_API_PUBLIC_KEY!,
+        apiPrivateKey: process.env.TURNKEY_API_PRIVATE_KEY!,
+      });
+
+      const client = new TurnkeyClient(
+        { baseUrl: process.env.TURNKEY_BASE_URL || 'https://api.turnkey.com' },
+        stamper
+      );
+
+      const organizationId = process.env.TURNKEY_ORGANIZATION_ID!;
+      const whoami = await client.getWhoami({ organizationId });
+      const turnkeyUserId = whoami.userId;
+
+      const importResp = await client.importWallet({
+        type: 'ACTIVITY_TYPE_IMPORT_WALLET',
+        organizationId,
+        parameters: {
+          userId: turnkeyUserId,
+          walletName: input.name || `Northveil Vault Imported ${userId} ${Date.now()}`,
+          encryptedBundle: input.encryptedBundle,
+          accounts: [
+            {
+              curve: 'CURVE_SECP256K1',
+              pathFormat: 'PATH_FORMAT_BIP32',
+              path: "m/44'/60'/0'/0/0",
+              addressFormat: 'ADDRESS_FORMAT_ETHEREUM',
+            },
+          ],
+        },
+        timestampMs: String(Date.now()),
+      });
+
+      const pollImport = await client.getActivity({
+        organizationId,
+        activityId: importResp.activity.id,
+      });
+
+      const result = (pollImport.activity.result as any)?.importWalletResult;
+      const address = (result?.addresses?.[0] || '').toLowerCase();
+      const mpcWalletId = result?.walletId || '';
+
+      if (!address || !mpcWalletId) {
+        throw new Error('IMPORT_WALLET_FAILED: Turnkey returned empty address or walletId');
       }
 
       return { mpcWalletId, address };
@@ -280,9 +378,6 @@ function turnkeyProvider(): MpcProvider {
     },
 
     async signAndBroadcast(req: SignRequest): Promise<SignResult> {
-      // 0. Single-use permit gate: Refuse to sign without an active, single-use approval permit
-      await assertSignPermit(req.mpcWalletId, req.payloadHash);
-
       const { TurnkeyClient } = await import('@turnkey/http');
       const { ApiKeyStamper } = await import('@turnkey/api-key-stamper');
 
@@ -375,6 +470,20 @@ function devMockProvider(): MpcProvider {
         address: mockWallet.address.toLowerCase(),
       };
     },
+    async importBegin(userId: string) {
+      return {
+        importBundle: 'mock_turnkey_import_bundle_' + crypto.randomUUID().replace(/-/g, ''),
+        organizationId: 'mock_turnkey_org',
+        userId: 'mock_turnkey_user_' + userId,
+      };
+    },
+    async importFinish(userId: string, input: { encryptedBundle: string; name?: string }) {
+      const mockWallet = ethers.Wallet.createRandom();
+      return {
+        mpcWalletId: 'mock-imported-mpc-' + crypto.randomUUID().replace(/-/g, '').slice(0, 12),
+        address: mockWallet.address.toLowerCase(),
+      };
+    },
     async importWallet(_userId: string, input: { mnemonic?: string; privateKey?: string }) {
       let addr = ethers.Wallet.createRandom().address.toLowerCase();
       if (input.privateKey) {
@@ -396,7 +505,6 @@ function devMockProvider(): MpcProvider {
       if (isHosted) {
         throw new Error('SECURITY VIOLATION: Dev mock signer forbidden in hosted environment');
       }
-      await assertSignPermit(req.mpcWalletId, req.payloadHash);
 
       // Deterministic pseudo-hash for unit testing
       const fakeTxHash = ethers.keccak256(ethers.toUtf8Bytes(req.payloadHash + Date.now().toString()));

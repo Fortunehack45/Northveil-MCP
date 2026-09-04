@@ -46,6 +46,8 @@ create table if not exists public.passkeys (
 create table if not exists public.wallets (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.users(id) on delete cascade,
+  name text,
+  is_primary boolean not null default false,
   address text not null,
   chain_family text not null default 'evm',
   mpc_provider text not null default 'turnkey',
@@ -54,6 +56,12 @@ create table if not exists public.wallets (
   created_at timestamptz not null default now(),
   unique (address)
 );
+
+create unique index if not exists users_email_lower_uidx
+  on public.users (lower(email));
+
+create unique index if not exists wallets_one_primary_per_user
+  on public.wallets (user_id) where (is_primary and status = 'active');
 
 -- 4. Agent Clients (Scoped assistant credentials Claude/Cursor use)
 create table if not exists public.agent_clients (
