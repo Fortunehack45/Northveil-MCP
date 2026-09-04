@@ -91,26 +91,49 @@ if (activeForbiddenEnvs.length > 0) {
   });
 }
 
-app.use(cors({
-  origin: (_origin, callback) => {
-    // Open gateway for MCP protocol, tools, and OAuth discovery
-    callback(null, true);
-  },
-  credentials: true,
-  exposedHeaders: ['WWW-Authenticate', 'Content-Type', 'Authorization', 'Location'],
-  allowedHeaders: [
-    'Content-Type',
-    'Authorization',
-    'X-API-Key',
-    'Accept',
-    'Origin',
-    'WWW-Authenticate',
-    'mcp-session-id',
-    'last-event-id',
-  ],
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'],
-}));
-app.options('*', cors());
+const ALLOW_HEADERS = [
+  'Content-Type',
+  'Authorization',
+  'X-API-Key',
+  'X-Session-Token',
+  'X-User-Id',
+  'Accept',
+  'Origin',
+  'WWW-Authenticate',
+  'mcp-session-id',
+  'Last-Event-ID',
+].join(',');
+
+const ALLOW_ORIGINS = new Set([
+  'https://wallet.northveil.xyz',
+  'https://www.northveil.xyz',
+  'https://northveil.xyz',
+  'http://localhost:5173',
+  'http://localhost:4173',
+  'http://127.0.0.1:5173',
+]);
+
+function originOk(origin?: string) {
+  if (!origin) return true;
+  if (ALLOW_ORIGINS.has(origin)) return true;
+  if (/^https:\/\/[\w-]+\.vercel\.app$/.test(origin)) return true;
+  if (/^https:\/\/([a-z0-9-]+\.)?claude\.ai$/.test(origin)) return true;
+  return false;
+}
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin as string | undefined;
+  if (origin && originOk(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Allow-Headers', ALLOW_HEADERS);
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS,HEAD');
+    res.setHeader('Access-Control-Expose-Headers', 'WWW-Authenticate, Content-Type, Authorization, Location, mcp-session-id');
+  }
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  next();
+});
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
