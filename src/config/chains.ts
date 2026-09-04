@@ -41,7 +41,7 @@ export const SUPPORTED_CHAINS: Record<string, ChainConfig> = {
     name: 'Arbitrum One',
     family: 'evm',
     chainId: 42161,
-    isWriteReady: true,
+    isWriteReady: false,
     rpcUrl: process.env.EVM_RPC_ARBITRUM || 'https://arb1.arbitrum.io/rpc',
     nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
     explorerUrl: 'https://arbiscan.io',
@@ -51,7 +51,7 @@ export const SUPPORTED_CHAINS: Record<string, ChainConfig> = {
     name: 'OP Mainnet',
     family: 'evm',
     chainId: 10,
-    isWriteReady: true,
+    isWriteReady: false,
     rpcUrl: process.env.EVM_RPC_OPTIMISM || 'https://mainnet.optimism.io',
     nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
     explorerUrl: 'https://optimistic.etherscan.io',
@@ -61,7 +61,7 @@ export const SUPPORTED_CHAINS: Record<string, ChainConfig> = {
     name: 'Polygon PoS',
     family: 'evm',
     chainId: 137,
-    isWriteReady: true,
+    isWriteReady: false,
     rpcUrl: process.env.EVM_RPC_POLYGON || 'https://polygon-rpc.com',
     nativeCurrency: { name: 'POL', symbol: 'POL', decimals: 18 },
     explorerUrl: 'https://polygonscan.com',
@@ -71,7 +71,7 @@ export const SUPPORTED_CHAINS: Record<string, ChainConfig> = {
     name: 'BNB Smart Chain',
     family: 'evm',
     chainId: 56,
-    isWriteReady: true,
+    isWriteReady: false,
     rpcUrl: process.env.EVM_RPC_BSC || 'https://binance.llamarpc.com',
     nativeCurrency: { name: 'BNB', symbol: 'BNB', decimals: 18 },
     explorerUrl: 'https://bscscan.com',
@@ -81,7 +81,7 @@ export const SUPPORTED_CHAINS: Record<string, ChainConfig> = {
     name: 'Avalanche C-Chain',
     family: 'evm',
     chainId: 43114,
-    isWriteReady: true,
+    isWriteReady: false,
     rpcUrl: process.env.EVM_RPC_AVALANCHE || 'https://api.avax.network/ext/bc/C/rpc',
     nativeCurrency: { name: 'AVAX', symbol: 'AVAX', decimals: 18 },
     explorerUrl: 'https://snowtrace.io',
@@ -101,18 +101,18 @@ export const SUPPORTED_CHAINS: Record<string, ChainConfig> = {
     name: 'Base Sepolia Testnet',
     family: 'evm',
     chainId: 84532,
-    isWriteReady: true,
+    isWriteReady: false,
     rpcUrl: process.env.EVM_RPC_BASE_SEPOLIA || 'https://sepolia.base.org',
     nativeCurrency: { name: 'Base Sepolia Ether', symbol: 'ETH', decimals: 18 },
     explorerUrl: 'https://sepolia.basescan.org',
   },
 
-  // Write-ready Solana chains
+  // Write-ready Solana chains (Disabled for write until Solana MPC program active)
   solana: {
     id: 'solana',
     name: 'Solana Mainnet-Beta',
     family: 'solana',
-    isWriteReady: true,
+    isWriteReady: false,
     rpcUrl: process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com',
     nativeCurrency: { name: 'Solana', symbol: 'SOL', decimals: 9 },
     explorerUrl: 'https://solscan.io',
@@ -121,7 +121,7 @@ export const SUPPORTED_CHAINS: Record<string, ChainConfig> = {
     id: 'solana_devnet',
     name: 'Solana Devnet',
     family: 'solana',
-    isWriteReady: true,
+    isWriteReady: false,
     rpcUrl: process.env.SOLANA_DEVNET_RPC_URL || 'https://api.devnet.solana.com',
     nativeCurrency: { name: 'Devnet SOL', symbol: 'SOL', decimals: 9 },
     explorerUrl: 'https://solscan.io?cluster=devnet',
@@ -190,5 +190,5 @@ export const SUPPORTED_CHAINS: Record<string, ChainConfig> = {
   },
 };
 
-export const WRITE_CHAINS = Object.values(SUPPORTED_CHAINS).filter(c => c.isWriteReady).map(c => c.id);
-export const READ_EXTRA_CHAINS = Object.values(SUPPORTED_CHAINS).filter(c => !c.isWriteReady).map(c => c.id);
+export const WRITE_CHAINS = ['base', 'ethereum', 'sepolia'];
+export const READ_EXTRA_CHAINS = Object.values(SUPPORTED_CHAINS).filter(c => !WRITE_CHAINS.includes(c.id)).map(c => c.id);

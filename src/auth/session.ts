@@ -78,7 +78,9 @@ export function verifySessionToken(token: string): SessionPayload | null {
     if (!b64Data || !signature) return null;
 
     const expectedSig = crypto.createHmac('sha256', SESSION_SECRET).update(b64Data).digest('base64url');
-    if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSig))) {
+    const sigBuf = Buffer.from(signature);
+    const expBuf = Buffer.from(expectedSig);
+    if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
       return null;
     }
 
@@ -208,13 +210,15 @@ export async function requireSession(req: Request, res: Response, next: NextFunc
       return res.status(401).json({ error: 'USER_NOT_FOUND' });
     }
 
-    // Look up active wallet
-    const { data: wallet } = await supabase
+    // Look up active wallet (order by is_primary descending to support multiple wallets)
+    const { data: wallets } = await supabase
       .from('wallets')
-      .select('id, address, chain_family, mpc_wallet_id, status')
+      .select('id, address, chain_family, mpc_wallet_id, status, is_primary')
       .eq('user_id', activeUser.id)
       .eq('status', 'active')
-      .maybeSingle();
+      .order('is_primary', { ascending: false });
+
+    const wallet = wallets?.[0];
 
     req.session = {
       userId: activeUser.id,

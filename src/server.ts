@@ -45,6 +45,10 @@ import {
   verifyPasskeyLogin,
   savePasskeyRecord,
   findPasskeyByCredentialId,
+  saveWebauthnChallenge,
+  consumeWebauthnChallenge,
+  getRpId,
+  allowedOrigins,
   challengeStore,
 } from './auth/passkey.js';
 import { startEmailOtp, verifyEmailOtp, nextStep } from './auth/emailOtp.js';
@@ -1219,13 +1223,15 @@ app.post('/auth/passkey/register/begin', async (req: Request, res: Response) => 
     return res.status(401).json({ error: 'SESSION_REQUIRED' });
   }
   try {
-    const isLocal = req.hostname.includes('localhost') || req.hostname.includes('127.0.0.1');
+    const clientHostname = req.body?.hostname || (req.headers.origin ? new URL(req.headers.origin as string).hostname : req.hostname);
+    console.log(`[Northveil] register/begin rp.id: ${getRpId(clientHostname)}, Origin: ${req.headers.origin}`);
     const options = await generatePasskeyRegistrationOptions({
       userId,
       userName,
-      rpID: isLocal ? 'localhost' : undefined,
+      hostname: clientHostname,
+      rpID: req.body?.rpID,
     });
-    return res.json(options);
+    return res.json({ ...options, options });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }
@@ -1237,17 +1243,17 @@ app.post('/auth/passkey/register/finish', async (req: Request, res: Response) =>
   if (!userId) {
     return res.status(401).json({ error: 'SESSION_REQUIRED' });
   }
-  const stored = challengeStore.get(`reg_${userId}`);
-  if (!stored) {
+  const challenge = await consumeWebauthnChallenge({ userId, kind: 'reg' });
+  if (!challenge) {
     return res.status(400).json({ error: 'CHALLENGE_EXPIRED_OR_NOT_FOUND' });
   }
   try {
-    const isLocal = req.hostname.includes('localhost') || req.hostname.includes('127.0.0.1');
+    const clientHostname = req.body?.hostname || (req.headers.origin ? new URL(req.headers.origin as string).hostname : req.hostname);
     const verified = await verifyPasskeyRegistration({
       response: req.body?.response || req.body,
-      expectedChallenge: stored.challenge,
+      expectedChallenge: challenge,
       origin: req.headers.origin as string,
-      rpID: isLocal ? 'localhost' : undefined,
+      hostname: clientHostname,
     });
 
     // Query existing wallets to link to this passkey credential
@@ -1266,7 +1272,6 @@ app.post('/auth/passkey/register/finish', async (req: Request, res: Response) =>
       transports: req.body?.response?.transports,
       walletIds: existingWalletIds,
     });
-    challengeStore.delete(`reg_${userId}`);
     return res.json({ success: true, credentialId: verified.credentialId });
   } catch (err: any) {
     return res.status(400).json({ error: err.message || 'PASSKEY_REGISTRATION_FAILED' });
@@ -1275,12 +1280,13 @@ app.post('/auth/passkey/register/finish', async (req: Request, res: Response) =>
 
 app.post('/auth/passkey/login/begin', async (req: Request, res: Response) => {
   try {
-    const isLocal = req.hostname.includes('localhost') || req.hostname.includes('127.0.0.1');
+    const clientHostname = req.body?.hostname || (req.headers.origin ? new URL(req.headers.origin as string).hostname : req.hostname);
     const options = await generatePasskeyLoginOptions({
       userId: req.body?.userId,
-      rpID: isLocal ? 'localhost' : undefined,
+      hostname: clientHostname,
+      rpID: req.body?.rpID,
     });
-    return res.json(options);
+    return res.json({ ...options, options });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }
@@ -1299,18 +1305,22 @@ app.post('/auth/passkey/login/finish', async (req: Request, res: Response) => {
 
   let expectedChallenge = challenge;
   if (!expectedChallenge) {
-    const found =
-      challengeStore.get(`auth_${passkey.user_id}`) ||
-      (response?.clientDataJSON
-        ? challengeStore.get(
-            `auth_raw_${JSON.parse(Buffer.from(response.clientDataJSON, 'base64url').toString('utf8')).challenge}`
-          )
-        : null);
-    if (found) expectedChallenge = found.challenge;
+    let rawChallenge: string | undefined;
+    if (response?.clientDataJSON) {
+      try {
+        rawChallenge = JSON.parse(Buffer.from(response.clientDataJSON, 'base64url').toString('utf8')).challenge;
+      } catch {}
+    }
+    const consumed = await consumeWebauthnChallenge({
+      userId: passkey.user_id,
+      kind: 'auth',
+      challenge: rawChallenge,
+    });
+    if (consumed) expectedChallenge = consumed;
   }
 
   try {
-    const isLocal = req.hostname.includes('localhost') || req.hostname.includes('127.0.0.1');
+    const clientHostname = req.body?.hostname || (req.headers.origin ? new URL(req.headers.origin as string).hostname : req.hostname);
     await verifyPasskeyLogin({
       response: response || req.body,
       expectedChallenge: expectedChallenge || '',
@@ -1320,16 +1330,18 @@ app.post('/auth/passkey/login/finish', async (req: Request, res: Response) => {
         counter: passkey.counter,
       },
       origin: req.headers.origin as string,
-      rpID: isLocal ? 'localhost' : undefined,
+      hostname: clientHostname,
     });
 
     const { data: user } = await supabase.from('users').select('*').eq('id', passkey.user_id).maybeSingle();
-    const { data: wallet } = await supabase
+    const { data: wallets } = await supabase
       .from('wallets')
       .select('*')
       .eq('user_id', passkey.user_id)
       .eq('status', 'active')
-      .maybeSingle();
+      .order('is_primary', { ascending: false });
+
+    const wallet = wallets?.[0];
 
     // Session elevated with passkeyOk: true
     const sessionToken = signSessionToken({ userId: passkey.user_id, email: user?.email || '', passkeyOk: true });

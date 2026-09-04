@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { Request } from 'express';
 import { supabase } from '../supabase.js';
 import { verifyClientKey } from './agentClient.js';
+import { verifySessionToken } from './session.js';
 import { Grant, Mode } from '../policy/grantEngine.js';
 
 export interface ToolWallet {
@@ -224,16 +225,37 @@ export async function resolveContext(
 
   // 1. Authorization: Bearer nv_oauth_... -> oauth_tokens.token_hash
   if (bearer && !bearer.startsWith('nv_live_')) {
-    let tokens: any[] = [];
-    try {
-      const { data } = await supabase
-        .from('oauth_tokens')
-        .select('*')
-        .gt('expires_at', new Date().toISOString());
-      if (data) tokens = data;
-    } catch {}
+    const targetHash = hashToken(bearer);
+    let match: any = null;
 
-    const match = await findHash(tokens, bearer, 'token_hash');
+    if (process.env.NODE_ENV !== 'production') {
+      for (const token of mockTokensRegistry.values()) {
+        if (token.tokenHash === targetHash || token.tokenHash === bearer) {
+          if (token.expiresAt > new Date()) {
+            match = {
+              user_id: token.userId,
+              client_id: token.clientId,
+              token_hash: token.tokenHash,
+              status: token.status || 'active',
+            };
+            break;
+          }
+        }
+      }
+    }
+
+    if (!match) {
+      try {
+        const { data } = await supabase
+          .from('oauth_tokens')
+          .select('*')
+          .eq('token_hash', targetHash)
+          .gt('expires_at', new Date().toISOString())
+          .maybeSingle();
+        if (data) match = data;
+      } catch {}
+    }
+
     if (!match) throw new HttpError(401, 'TOKEN_INVALID', 'Invalid OAuth token', true);
 
     if (match.status === 'revoked' || match.status === 'paused') {
@@ -288,16 +310,10 @@ export async function resolveContext(
   if (sessionToken || req.session?.userId) {
     let sessionUserId = req.session?.userId;
     if (!sessionUserId && sessionToken) {
-      try {
-        const hash = hashToken(sessionToken);
-        const { data: s } = await supabase
-          .from('sessions')
-          .select('user_id, expires_at')
-          .eq('session_hash', hash)
-          .gt('expires_at', new Date().toISOString())
-          .maybeSingle();
-        if (s?.user_id) sessionUserId = s.user_id;
-      } catch {}
+      const payload = verifySessionToken(sessionToken);
+      if (payload?.userId) {
+        sessionUserId = payload.userId;
+      }
     }
     if (sessionUserId) {
       return loadScope(sessionUserId, null, args);
@@ -316,7 +332,8 @@ export async function loadScope(userId: string, clientId: string | null, args?: 
       .from('wallets')
       .select('id, user_id, address, mpc_wallet_id, is_primary, status, chain_family')
       .eq('user_id', userId)
-      .eq('status', 'active');
+      .eq('status', 'active')
+      .order('is_primary', { ascending: false });
     if (data && !error) wallets = data;
   } catch {}
 

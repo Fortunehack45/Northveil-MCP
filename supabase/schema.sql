@@ -42,6 +42,17 @@ create table if not exists public.passkeys (
   last_used_at timestamptz
 );
 
+-- 2b. WebAuthn Registration & Authentication Challenges (5-minute TTL, single-use)
+create table if not exists public.webauthn_challenges (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references public.users(id) on delete cascade,
+  kind text not null check (kind in ('reg','auth')),
+  challenge text not null,
+  expires_at timestamptz not null,
+  created_at timestamptz default now()
+);
+create index if not exists webauthn_challenges_user on public.webauthn_challenges (user_id, kind);
+
 -- 3. MPC Wallets (Address and vendor partition handle ONLY - NO private keys or seeds)
 create table if not exists public.wallets (
   id uuid primary key default gen_random_uuid(),

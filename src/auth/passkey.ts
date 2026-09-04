@@ -9,8 +9,25 @@ async function getSimpleWebAuthn() {
   return simpleWebAuthnPromise;
 }
 
-const defaultRpID = process.env.WEBAUTHN_RP_ID || 'wallet.northveil.xyz';
-const defaultOrigin = process.env.WEBAUTHN_ORIGIN || 'https://wallet.northveil.xyz';
+export function getRpId(hostname?: string): string {
+  if (hostname === 'localhost' || hostname === '127.0.0.1') return hostname;
+  return process.env.WEBAUTHN_RP_ID || 'northveil.xyz';
+}
+
+export function allowedOrigins(): string[] {
+  const extra = (process.env.WEBAUTHN_ORIGINS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return [
+    'https://wallet.northveil.xyz',
+    'https://northveil.xyz',
+    'https://www.northveil.xyz',
+    'http://localhost:5173',
+    'http://127.0.0.1:5173',
+    ...extra,
+  ];
+}
 
 export interface StoredAuthenticator {
   credentialID: Uint8Array;
@@ -19,7 +36,7 @@ export interface StoredAuthenticator {
   transports?: string[];
 }
 
-// Challenge store with TTL (5 minutes)
+// In-memory fallback challenge store for offline / local testing
 interface StoredChallenge {
   challenge: string;
   userId?: string;
@@ -27,6 +44,78 @@ interface StoredChallenge {
 }
 
 export const challengeStore = new Map<string, StoredChallenge>();
+
+export async function saveWebauthnChallenge(opts: {
+  userId?: string | null;
+  kind: 'reg' | 'auth';
+  challenge: string;
+  ttlMs?: number;
+}): Promise<void> {
+  const ttl = opts.ttlMs || 5 * 60 * 1000;
+  const expiresAt = new Date(Date.now() + ttl).toISOString();
+  try {
+    const { error } = await supabase.from('webauthn_challenges').insert({
+      user_id: opts.userId || null,
+      kind: opts.kind,
+      challenge: opts.challenge,
+      expires_at: expiresAt,
+    });
+    if (error) throw error;
+  } catch (err: any) {
+    // In-memory fallback
+    challengeStore.set(`${opts.kind}_${opts.userId || opts.challenge}`, {
+      challenge: opts.challenge,
+      userId: opts.userId || undefined,
+      expiresAt: Date.now() + ttl,
+    });
+  }
+}
+
+export async function consumeWebauthnChallenge(opts: {
+  userId?: string | null;
+  kind: 'reg' | 'auth';
+  challenge?: string;
+}): Promise<string | null> {
+  const now = new Date().toISOString();
+  try {
+    let query = supabase
+      .from('webauthn_challenges')
+      .select('id, challenge, user_id')
+      .eq('kind', opts.kind)
+      .gt('expires_at', now)
+      .order('created_at', { ascending: false });
+
+    if (opts.userId) {
+      query = query.eq('user_id', opts.userId);
+    }
+    if (opts.challenge) {
+      query = query.eq('challenge', opts.challenge);
+    }
+
+    const { data, error } = await query.limit(1);
+    if (!error && data && data.length > 0) {
+      const match = data[0];
+      await supabase.from('webauthn_challenges').delete().eq('id', match.id);
+      return match.challenge;
+    }
+  } catch {}
+
+  const keys = [
+    `${opts.kind}_${opts.userId || ''}`,
+    `${opts.kind}_${opts.challenge || ''}`,
+    `reg_${opts.userId || ''}`,
+    `auth_${opts.userId || ''}`,
+    `auth_raw_${opts.challenge || ''}`,
+  ];
+  for (const k of keys) {
+    const stored = challengeStore.get(k);
+    if (stored && stored.expiresAt > Date.now()) {
+      challengeStore.delete(k);
+      return stored.challenge;
+    }
+  }
+  return null;
+}
 
 export function pruneExpiredChallenges(): void {
   const now = Date.now();
@@ -45,28 +134,30 @@ export async function generatePasskeyRegistrationOptions(opts: {
   userName: string;
   userDisplayName?: string;
   rpID?: string;
+  hostname?: string;
 }) {
   const { generateRegistrationOptions } = await getSimpleWebAuthn();
-  pruneExpiredChallenges();
+  const effectiveRpId = getRpId(opts.hostname || opts.rpID);
 
   const options = await generateRegistrationOptions({
     rpName: 'Northveil',
-    rpID: opts.rpID || defaultRpID,
-    userID: Buffer.from(opts.userId, 'utf-8'),
+    rpID: effectiveRpId,
+    userID: new TextEncoder().encode(opts.userId),
     userName: opts.userName,
     userDisplayName: opts.userDisplayName || opts.userName,
     attestationType: 'none',
+    timeout: 120_000,
     authenticatorSelection: {
       residentKey: 'preferred',
-      userVerification: 'required',
+      userVerification: 'preferred',
     },
+    supportedAlgorithmIDs: [-7, -257],
   });
 
-  // Save challenge keyed by userId
-  challengeStore.set(`reg_${opts.userId}`, {
-    challenge: options.challenge,
+  await saveWebauthnChallenge({
     userId: opts.userId,
-    expiresAt: Date.now() + 5 * 60 * 1000,
+    kind: 'reg',
+    challenge: options.challenge,
   });
 
   return options;
@@ -78,27 +169,21 @@ export async function generatePasskeyRegistrationOptions(opts: {
 export async function generatePasskeyLoginOptions(opts?: {
   userId?: string;
   rpID?: string;
+  hostname?: string;
 }) {
   const { generateAuthenticationOptions } = await getSimpleWebAuthn();
-  pruneExpiredChallenges();
+  const effectiveRpId = getRpId(opts?.hostname || opts?.rpID);
 
   const options = await generateAuthenticationOptions({
-    rpID: opts?.rpID || defaultRpID,
-    userVerification: 'required',
+    rpID: effectiveRpId,
+    userVerification: 'preferred',
+    timeout: 120_000,
   });
 
-  const key = opts?.userId ? `auth_${opts.userId}` : `auth_challenge_${options.challenge}`;
-  challengeStore.set(key, {
-    challenge: options.challenge,
+  await saveWebauthnChallenge({
     userId: opts?.userId,
-    expiresAt: Date.now() + 5 * 60 * 1000,
-  });
-
-  // Also index by raw challenge so finish can look it up even without userId upfront
-  challengeStore.set(`auth_raw_${options.challenge}`, {
+    kind: 'auth',
     challenge: options.challenge,
-    userId: opts?.userId,
-    expiresAt: Date.now() + 5 * 60 * 1000,
   });
 
   return options;
@@ -112,15 +197,18 @@ export async function verifyPasskeyRegistration(opts: {
   expectedChallenge: string;
   rpID?: string;
   origin?: string;
+  hostname?: string;
 }) {
   const { verifyRegistrationResponse } = await getSimpleWebAuthn();
+  const effectiveRpId = getRpId(opts.hostname || opts.rpID);
+  const origins = allowedOrigins();
 
   const verifyOpts = {
     response: opts.response,
     expectedChallenge: opts.expectedChallenge,
-    expectedOrigin: opts.origin || defaultOrigin,
-    expectedRPID: opts.rpID || defaultRpID,
-    requireUserVerification: true,
+    expectedOrigin: origins,
+    expectedRPID: effectiveRpId,
+    requireUserVerification: false,
   };
 
   const verification = await verifyRegistrationResponse(verifyOpts as any);
@@ -150,20 +238,23 @@ export async function verifyPasskeyLogin(opts: {
   storedAuthenticator: StoredAuthenticator;
   rpID?: string;
   origin?: string;
+  hostname?: string;
 }) {
   const { verifyAuthenticationResponse } = await getSimpleWebAuthn();
+  const effectiveRpId = getRpId(opts.hostname || opts.rpID);
+  const origins = allowedOrigins();
 
   const verifyOpts = {
     response: opts.response,
     expectedChallenge: opts.expectedChallenge,
-    expectedOrigin: opts.origin || defaultOrigin,
-    expectedRPID: opts.rpID || defaultRpID,
+    expectedOrigin: origins,
+    expectedRPID: effectiveRpId,
     authenticator: {
       credentialID: opts.storedAuthenticator.credentialID,
       credentialPublicKey: opts.storedAuthenticator.credentialPublicKey,
       counter: opts.storedAuthenticator.counter,
     },
-    requireUserVerification: true,
+    requireUserVerification: false,
   };
 
   const result = await verifyAuthenticationResponse(verifyOpts as any);

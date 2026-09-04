@@ -103,6 +103,22 @@ To guarantee non-custodial operation, Turnkey organizations enforce policies tha
 }
 ```
 
+### Turnkey Console Checklist (100% Non-Custodial Verification)
+
+To eliminate any custodial leftovers, the organization administrator must apply the following checklist in the Turnkey Console (`app.turnkey.com`):
+
+- [ ] **Deny Direct Root Org Key Signing**:
+  - In Console -> Policies, create an `EFFECT_DENY` policy on `ACTIVITY_TYPE_SIGN_TRANSACTION_V2` when `!hasUserAuthorization(activity)`.
+  - This ensures that the backend MCP server's API key alone cannot sign transactions without user consent.
+- [ ] **Enforce Passkey-Bound Sub-Organizations**:
+  - Require WebAuthn authenticators (`CREDENTIAL_TYPE_WEBAUTHN_AUTHENTICATOR`) as root approvers for each sub-organization vault.
+- [ ] **Constrain Autonomous Execution**:
+  - For autonomous delegated signing, bound enclave permissions to verified spending limits and whitelisted recipient conditions.
+
+> [!IMPORTANT]
+> Northveil's software architecture enforces zero database seed storage and zero agent key exposure. Applying the Turnkey Console deny-policy completes 100% non-custody by preventing operator root keys from signing without user authorization.
+
+
 ---
 
 ## Threat Model & Attack Surface Mitigation
