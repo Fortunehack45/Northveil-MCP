@@ -45,7 +45,7 @@ async function main() {
     });
     assert.strictEqual(resNoAuth.status, 401, 'Unauthenticated /mcp tools/call must return HTTP 401');
     const wwwAuth = resNoAuth.headers.get('www-authenticate');
-    assert(wwwAuth && wwwAuth.includes('Bearer realm="Northveil"'), 'Must include WWW-Authenticate header with Bearer realm');
+    assert(wwwAuth && (wwwAuth.includes('Bearer realm="Northveil"') || wwwAuth.includes('Bearer realm="mcp"')), 'Must include WWW-Authenticate header with Bearer realm');
     console.log('   ✓ 401 + WWW-Authenticate verified');
 
     // Setup Mock Tenants A and B

@@ -28,6 +28,10 @@ export async function handleDynamicClientRegistration(body: any): Promise<{
       typeof u === 'string' &&
       (u.startsWith('https://claude.ai/') ||
         u.startsWith('https://claude.com/') ||
+        u.startsWith('https://chatgpt.com/') ||
+        u.startsWith('https://chatgpt.com/connector/oauth/') ||
+        u.startsWith('https://chat.openai.com/') ||
+        u.startsWith('https://platform.openai.com/') ||
         u.startsWith('http://127.0.0.1') ||
         u.startsWith('http://localhost'))
   );
@@ -169,13 +173,13 @@ export async function insertOauthToken(opts: {
 /**
  * Ensures an agent_clients row exists for the OAuth client bound to the user
  */
-export async function ensureOauthAgentClient(userId: string): Promise<string> {
+export async function ensureOauthAgentClient(userId: string, clientName = 'OAuth Agent Client'): Promise<string> {
   try {
     const { data: existing } = await supabase
       .from('agent_clients')
       .select('id')
       .eq('user_id', userId)
-      .eq('name', 'Claude AI')
+      .eq('client_key_hash', 'oauth_managed')
       .eq('status', 'active')
       .maybeSingle();
 
@@ -185,7 +189,7 @@ export async function ensureOauthAgentClient(userId: string): Promise<string> {
       .from('agent_clients')
       .insert({
         user_id: userId,
-        name: 'Claude AI',
+        name: clientName,
         client_key_hash: 'oauth_managed',
         status: 'active',
       })

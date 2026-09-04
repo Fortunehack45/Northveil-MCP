@@ -193,8 +193,8 @@ async function main() {
     });
     assert.strictEqual(resMcpResources.status, 200);
     const mcpJson = await resMcpResources.json();
-    assert.deepStrictEqual(mcpJson.result, { resources: [] });
-    console.log('   ✓ Verified: resources/list returns { resources: [] }');
+    assert(Array.isArray(mcpJson.result?.resources), 'resources must be an array');
+    console.log(`   ✓ Verified: resources/list returns valid resources array (${mcpJson.result?.resources?.length} registered)`);
 
     console.log('\n✅ ALL FOLLOW-UP 15 NON-CUSTODIAL INVARIANT TESTS PASSED!\n');
   } finally {

@@ -2,6 +2,9 @@ import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import { rateLimit } from 'express-rate-limit';
 import { resolveContext, HttpError, hashToken } from './auth/resolveContext.js';
+import { toolCatalog } from './mcp/toolCatalog.js';
+import { handleMcpJsonRpc } from './mcp/handleJsonRpc.js';
+import { executeTool } from './tools/dispatch.js';
 import { prepareTransfer } from './tools/prepareTransfer.js';
 import { getPortfolio } from './tools/getPortfolio.js';
 import { getTransactionStatus } from './tools/getTransactionStatus.js';
@@ -108,6 +111,8 @@ const ALLOW_ORIGINS = new Set([
   'https://wallet.northveil.xyz',
   'https://www.northveil.xyz',
   'https://northveil.xyz',
+  'https://chatgpt.com',
+  'https://chat.openai.com',
   'http://localhost:5173',
   'http://localhost:4173',
   'http://127.0.0.1:5173',
@@ -118,6 +123,8 @@ function originOk(origin?: string) {
   if (ALLOW_ORIGINS.has(origin)) return true;
   if (/^https:\/\/[\w-]+\.vercel\.app$/.test(origin)) return true;
   if (/^https:\/\/([a-z0-9-]+\.)?claude\.ai$/.test(origin)) return true;
+  if (/^https:\/\/([a-z0-9-]+\.)?chatgpt\.com$/.test(origin)) return true;
+  if (/^https:\/\/([a-z0-9-]+\.)?openai\.com$/.test(origin)) return true;
   return false;
 }
 
@@ -551,432 +558,18 @@ app.get('/health', (req: Request, res: Response) => {
 });
 
 // -------------------------------------------------------------
-// Tool Dispatcher
+// Canonical MCP & Tool Dispatching (POST /mcp, POST /sse, POST /message)
 // -------------------------------------------------------------
-async function executeTool(name: string, args: Record<string, any>, req: Request, providedCtx?: any) {
-  // Public inspection tools (no wallet context required)
-  if (name === 'nv_health') {
-    return {
-      status: 'ok',
-      system: 'Northveil Non-Custodial Control Plane',
-      custody: 'none',
-      signing: 'threshold_mpc',
-      timestamp: new Date().toISOString(),
-    };
-  }
+export { toolCatalog } from './mcp/toolCatalog.js';
+export { handleMcpJsonRpc } from './mcp/handleJsonRpc.js';
+export { executeTool } from './tools/dispatch.js';
 
-  if (name === 'nv_list_networks') {
-    return {
-      writeReadyChains: WRITE_CHAINS,
-      readOnlyChains: READ_EXTRA_CHAINS,
-      allSupported: Object.keys(SUPPORTED_CHAINS),
-    };
-  }
+app.post('/mcp', express.json(), (req: Request, res: Response) => handleMcpJsonRpc(req, res, req.body));
+app.post('/sse', express.json(), (req: Request, res: Response) => handleMcpJsonRpc(req, res, req.body));
 
-  if (name === 'nv_get_token_price') {
-    return await getTokenPrice(args.symbol);
-  }
-
-  // All wallet operations require verified client key or OAuth bearer token
-  const ctx = providedCtx || (req as any).nv || (await resolveContext(req, args));
-
-  // Cross-tenant isolation check: if walletAddress is requested, it MUST match the user's active wallet
-  if (args.walletAddress && typeof args.walletAddress === 'string') {
-    const requested = args.walletAddress.trim().toLowerCase();
-    const authorized = ctx.wallet.address.toLowerCase();
-    if (requested !== authorized) {
-      throw new HttpError(403, 'WALLET_NOT_IN_GRANT');
-    }
-  }
-
-  switch (name) {
-    // 2. nv_list_wallets
-    case 'nv_list_wallets':
-    case 'get_wallet_info': {
-      if (!ctx?.wallet?.address) {
-        return {
-          wallets: [],
-          hint: 'Create a vault at wallet.northveil.xyz',
-          grantMode: ctx?.grant?.mode || 'always_ask',
-          allowedChains: ctx?.grant?.chains || ['eip155:8453', 'eip155:11155111'],
-          allowedAssets: ctx?.grant?.allowedAssets || ['ETH', 'USDC'],
-          maxWeiPerTx: (ctx?.grant?.maxWeiPerTx || 0n).toString(),
-          maxWeiPerDay: (ctx?.grant?.maxWeiPerDay || 0n).toString(),
-        };
-      }
-
-      const walletList = (ctx as any).wallets && Array.isArray((ctx as any).wallets) && (ctx as any).wallets.length > 0
-        ? (ctx as any).wallets.map((w: any) => ({
-            id: w.id,
-            address: w.address,
-            chainFamily: w.chainFamily || w.chain_family,
-          }))
-        : [
-            {
-              id: ctx.wallet.id,
-              address: ctx.wallet.address,
-              chainFamily: ctx.wallet.chainFamily,
-            },
-          ];
-
-      return {
-        wallets: walletList,
-        grantMode: ctx.grant?.mode || 'always_ask',
-        allowedChains: ctx.grant?.chains || ['eip155:8453', 'eip155:11155111'],
-        allowedAssets: ctx.grant?.allowedAssets || ['ETH', 'USDC'],
-        maxWeiPerTx: (ctx.grant?.maxWeiPerTx || 0n).toString(),
-        maxWeiPerDay: (ctx.grant?.maxWeiPerDay || 0n).toString(),
-      };
-    }
-
-    // 4. nv_get_balances
-    case 'nv_get_balances':
-      return await getBalances(ctx.wallet.address, args.network || 'all');
-
-    // 5. nv_get_portfolio
-    case 'nv_get_portfolio':
-    case 'get_portfolio':
-      return await getPortfolio(ctx, args);
-
-    // 6. nv_get_nft_balances
-    case 'nv_get_nft_balances':
-      return await getNftBalances(ctx.wallet.address, args.network || 'base');
-
-    // 7. nv_get_token_price
-    case 'nv_get_token_price':
-      return await getTokenPrice(args.symbol || 'ETH');
-
-    // 8. nv_get_tx
-    case 'nv_get_tx':
-    case 'get_transaction_status':
-      return await getTransactionStatus(ctx, args as any);
-
-    // 9. nv_simulate_tx
-    case 'nv_simulate_tx':
-      return await simulateTx({
-        chain: args.network || 'base',
-        from: ctx.wallet.address,
-        to: args.to,
-        data: args.data,
-        value: args.value,
-      });
-
-    // 10. nv_estimate_gas
-    case 'nv_estimate_gas':
-      return await estimateGas({
-        chain: args.network || 'base',
-        from: ctx.wallet.address,
-        to: args.to,
-        data: args.data,
-        value: args.value,
-      });
-
-    // 11. nv_list_positions
-    case 'nv_list_positions':
-      return await listPositions(ctx);
-
-    // 12. nv_get_tokenomics
-    case 'nv_get_tokenomics':
-      return {
-        address: args.contractAddress || ctx.wallet.address,
-        tokenomics: [
-          { label: 'community', percent: 90 },
-          { label: 'team', percent: 10 },
-        ],
-      };
-
-    // 12.5. nv_get_request
-    case 'nv_get_request':
-    case 'get_request':
-      return await getRequest(args.requestId || args.id);
-
-    // 13. nv_prepare_transfer
-    case 'nv_prepare_transfer':
-    case 'prepare_transfer':
-      return await submitIntent(ctx, 'nv_prepare_transfer', args as any);
-
-    // 14. nv_prepare_swap
-    case 'nv_prepare_swap':
-      return await submitIntent(ctx, 'nv_prepare_swap', args as any);
-
-    // 15. nv_prepare_deploy_token
-    case 'nv_prepare_deploy_token':
-      return await submitIntent(ctx, 'nv_prepare_deploy_token', args as any);
-
-    // 16. nv_prepare_deploy_nft
-    case 'nv_prepare_deploy_nft':
-      return await submitIntent(ctx, 'nv_prepare_deploy_nft', args as any);
-
-    // 17. nv_prepare_mint_nft
-    case 'nv_prepare_mint_nft':
-      return await submitIntent(ctx, 'nv_prepare_mint_nft', args as any);
-
-    // 18. nv_prepare_mint_token
-    case 'nv_prepare_mint_token':
-      return await submitIntent(ctx, 'nv_prepare_mint_token', args as any);
-
-    // 19. nv_prepare_contract_call
-    case 'nv_prepare_contract_call':
-      return await submitIntent(ctx, 'nv_prepare_contract_call', args as any);
-
-    // 20. nv_place_position
-    case 'nv_place_position':
-      return await placePosition(ctx, args as any);
-
-    // 21. nv_cancel_position
-    case 'nv_cancel_position':
-      return await cancelPosition(ctx, args.positionId);
-
-    // 22. nv_list_pending_approvals
-    case 'nv_list_pending_approvals':
-    case 'list_pending_approvals': {
-      const { data } = await supabase
-        .from('pending_approvals')
-        .select('id, payload_hash, canonical_tx, expires_at, used, created_at')
-        .eq('client_id', ctx.clientId)
-        .eq('used', false);
-      return { pendingApprovals: data || [] };
-    }
-
-    // 23. nv_get_approval_status
-    case 'nv_get_approval_status': {
-      const { data } = await supabase
-        .from('pending_approvals')
-        .select('id, used, expires_at, created_at')
-        .eq('id', args.approvalId)
-        .single();
-      return data || { error: 'Approval ticket not found' };
-    }
-
-    default:
-      throw new HttpError(404, `Tool "${name}" not found or out of scope.`);
-  }
-}
-
-// -------------------------------------------------------------
-// JSON-RPC 2.0 MCP Endpoint (POST /mcp & POST /sse)
-// -------------------------------------------------------------
-
-export function toolCatalog() {
-  return [
-    // Read Tools
-    { name: 'nv_health', description: 'Query Northveil server health, signing fabric, and network status.', inputSchema: { type: 'object', properties: {} } },
-    { name: 'nv_list_wallets', description: 'List vaults this agent may use.', inputSchema: { type: 'object', properties: {} } },
-    { name: 'nv_list_networks', description: 'List write-ready chains and read-only indexer chains.', inputSchema: { type: 'object', properties: {} } },
-    { name: 'nv_get_balances', description: 'Query balances across one chain or all supported chains.', inputSchema: { type: 'object', properties: { network: { type: 'string', description: 'Chain name or "all"' } } } },
-    { name: 'nv_get_portfolio', description: 'Retrieve real-time USD portfolio rollup across chains.', inputSchema: { type: 'object', properties: {} } },
-    { name: 'nv_get_nft_balances', description: 'Retrieve NFT collection balances on authorized chain.', inputSchema: { type: 'object', properties: { network: { type: 'string' } } } },
-    { name: 'nv_get_token_price', description: 'Fetch spot USD price for asset symbol.', inputSchema: { type: 'object', properties: { symbol: { type: 'string' } }, required: ['symbol'] } },
-    { name: 'nv_get_tx', description: 'Query execution status and confirmation receipt by transaction hash.', inputSchema: { type: 'object', properties: { txHash: { type: 'string' }, chain: { type: 'string' } }, required: ['txHash'] } },
-    { name: 'nv_get_request', description: 'Query lifecycle status of an agent spend or transaction request by ID (pending_approval, pending_signature, pending_confirmation, success, denied, error).', inputSchema: { type: 'object', properties: { requestId: { type: 'string', description: 'Agent request ID' } }, required: ['requestId'] } },
-    { name: 'nv_simulate_tx', description: 'Perform simulation before submitting an on-chain transaction.', inputSchema: { type: 'object', properties: { to: { type: 'string' }, data: { type: 'string' }, value: { type: 'string' }, network: { type: 'string' } }, required: ['to'] } },
-    { name: 'nv_estimate_gas', description: 'Estimate EVM network fees and gas limits.', inputSchema: { type: 'object', properties: { to: { type: 'string' }, network: { type: 'string' } }, required: ['to'] } },
-    { name: 'nv_list_positions', description: 'List open take-profit, stop-loss, and limit orders.', inputSchema: { type: 'object', properties: {} } },
-    { name: 'nv_get_tokenomics', description: 'Retrieve metadata and allocation for user-deployed token.', inputSchema: { type: 'object', properties: { contractAddress: { type: 'string' } } } },
-
-    // Write Tools
-    {
-      name: 'nv_prepare_transfer',
-      description: 'Stage an on-chain transfer. Submits spend intent once and returns requestId. Agent polls nv_get_request until terminal status. Requires passkey confirmation in Always Ask.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          to: { type: 'string' },
-          amount: { type: 'string' },
-          chain: { type: 'string' },
-          asset: { type: 'string' },
-          data: { type: 'string' },
-          walletId: { type: 'string', description: 'Optional; must be in the grant' },
-        },
-        required: ['to', 'amount'],
-      },
-    },
-    { name: 'nv_prepare_swap', description: 'Stage an asset swap via DEX aggregator. Submits spend intent once and returns requestId. Agent polls nv_get_request until terminal status.', inputSchema: { type: 'object', properties: { side: { type: 'string', enum: ['buy', 'sell'] }, baseAsset: { type: 'string' }, quoteAsset: { type: 'string' }, amount: { type: 'string' }, network: { type: 'string' }, slippageBps: { type: 'number' } }, required: ['side', 'baseAsset', 'quoteAsset', 'amount'] } },
-    { name: 'nv_prepare_deploy_token', description: 'Deploy an ERC-20 or SPL token. Submits spend intent once and returns requestId. Agent polls nv_get_request until terminal status.', inputSchema: { type: 'object', properties: { name: { type: 'string' }, symbol: { type: 'string' }, totalSupply: { type: 'string' }, network: { type: 'string' }, imageUrl: { type: 'string' }, tokenomics: { type: 'array' } }, required: ['name', 'symbol', 'totalSupply'] } },
-    { name: 'nv_prepare_deploy_nft', description: 'Deploy an ERC-721 NFT collection. Submits spend intent once and returns requestId. Agent polls nv_get_request until terminal status.', inputSchema: { type: 'object', properties: { name: { type: 'string' }, symbol: { type: 'string' }, network: { type: 'string' }, imageUrl: { type: 'string' }, maxSupply: { type: 'number' } }, required: ['name', 'symbol'] } },
-    { name: 'nv_prepare_mint_nft', description: 'Mint an NFT item on authorized collection. Submits spend intent once and returns requestId. Agent polls nv_get_request until terminal status.', inputSchema: { type: 'object', properties: { contractAddress: { type: 'string' }, network: { type: 'string' }, to: { type: 'string' }, tokenUri: { type: 'string' } }, required: ['contractAddress'] } },
-    { name: 'nv_prepare_mint_token', description: 'Call mint on a token contract where wallet is minter. Submits spend intent once and returns requestId. Agent polls nv_get_request until terminal status.', inputSchema: { type: 'object', properties: { contractAddress: { type: 'string' }, to: { type: 'string' }, amount: { type: 'string' }, network: { type: 'string' } }, required: ['contractAddress', 'to', 'amount'] } },
-    { name: 'nv_prepare_contract_call', description: 'Generic contract call. Submits spend intent once and returns requestId. Agent polls nv_get_request until terminal status. Always requires passkey confirmation.', inputSchema: { type: 'object', properties: { to: { type: 'string' }, data: { type: 'string' }, value: { type: 'string' }, network: { type: 'string' } }, required: ['to', 'data'] } },
-    { name: 'nv_place_position', description: 'Place a take-profit, stop-loss, or limit order.', inputSchema: { type: 'object', properties: { baseAsset: { type: 'string' }, quoteAsset: { type: 'string' }, side: { type: 'string', enum: ['take_profit', 'stop_loss', 'limit_buy', 'limit_sell'] }, sizeBase: { type: 'string' }, triggerPriceUsd: { type: 'number' }, network: { type: 'string' } }, required: ['baseAsset', 'quoteAsset', 'side', 'sizeBase', 'triggerPriceUsd'] } },
-    { name: 'nv_cancel_position', description: 'Cancel an open position watcher.', inputSchema: { type: 'object', properties: { positionId: { type: 'string' } }, required: ['positionId'] } },
-    { name: 'nv_list_pending_approvals', description: 'List pending approval tickets awaiting human passkey confirmation.', inputSchema: { type: 'object', properties: {} } },
-    { name: 'nv_get_approval_status', description: 'Check execution status of an approval ticket by ID.', inputSchema: { type: 'object', properties: { approvalId: { type: 'string' } }, required: ['approvalId'] } },
-  ];
-}
-
-function isPublicMcpMethod(req: Request): boolean {
-  const method = req.body?.method;
-  const rawPath = req.originalUrl?.split('?')[0] || req.path || '';
-  if (req.method === 'GET' && (rawPath.endsWith('/sse') || rawPath.endsWith('/mcp') || req.baseUrl === '/sse' || req.baseUrl === '/mcp' || req.path === '/sse' || req.path === '/mcp' || req.path === '/')) return true;
-  if (method === 'initialize') return true;
-  if (method === 'notifications/initialized') return true;
-  if (method === 'ping') return true;
-  if (method === 'tools/list') return true;
-  if (method === 'resources/list') return true;
-  return false;
-}
-
-app.use(['/mcp', '/sse'], async (req: Request, res: Response, next: NextFunction) => {
-  if (req.method === 'OPTIONS') return next();
-  if (isPublicMcpMethod(req)) return next();
-  try {
-    (req as any).nv = await resolveContext(req);
-    next();
-  } catch (e: any) {
-    res.set(
-      'WWW-Authenticate',
-      `Bearer realm="Northveil", resource_metadata="https://mcp.northveil.xyz/.well-known/oauth-protected-resource"`
-    );
-    return res.status(e.status || e.statusCode || 401).json({
-      jsonrpc: '2.0',
-      error: { code: -32001, message: e.message || 'UNAUTHORIZED' },
-    });
-  }
-});
-
-async function handleMcpJsonRpc(req: Request, res: Response) {
-  const { jsonrpc, id, method, params } = req.body || {};
-
-  if (jsonrpc !== '2.0') {
-    return res.status(400).json({ jsonrpc: '2.0', id: id || null, error: { code: -32600, message: 'Invalid Request: jsonrpc must be "2.0"' } });
-  }
-
-  const isSseStream = Boolean(req.headers.accept && req.headers.accept.includes('text/event-stream'));
-
-  const sendResponse = (statusCode: number, payload: any) => {
-    if (isSseStream) {
-      res.status(statusCode);
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-      res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
-      res.flushHeaders();
-      res.write(`event: message\ndata: ${JSON.stringify(payload)}\n\n`);
-      return res.end();
-    }
-    return res.status(statusCode).json(payload);
-  };
-
-  try {
-    if (method === 'initialize') {
-      const requestedVersion = params?.protocolVersion;
-      const protocolVersion = ['2024-11-05', '2025-03-26', '2025-06-18'].includes(requestedVersion)
-        ? requestedVersion
-        : '2025-03-26';
-
-      return sendResponse(200, {
-        jsonrpc: '2.0',
-        id,
-        result: {
-          protocolVersion,
-          capabilities: { tools: { listChanged: false } },
-          serverInfo: {
-            name: 'northveil-mcp',
-            version: '2.0.0',
-            iconUrl: 'https://iili.io/CDS9fvn.png',
-            logoUrl: 'https://iili.io/CDS9fvn.png',
-            icon: 'https://iili.io/CDS9fvn.png',
-          },
-        },
-      });
-    }
-
-    if (method === 'notifications/initialized') {
-      return res.status(202).json({ status: 'accepted' });
-    }
-
-    if (method === 'ping') {
-      return sendResponse(200, {
-        jsonrpc: '2.0',
-        id,
-        result: {},
-      });
-    }
-
-    if (method === 'tools/list') {
-      return sendResponse(200, {
-        jsonrpc: '2.0',
-        id,
-        result: {
-          tools: toolCatalog(),
-        },
-      });
-    }
-
-    if (method === 'resources/list') {
-      return sendResponse(200, {
-        jsonrpc: '2.0',
-        id,
-        result: {
-          resources: [],
-        },
-      });
-    }
-
-    if (method === 'tools/call') {
-      let ctx = (req as any).nv;
-      if (!ctx) {
-        ctx = await resolveContext(req, params?.arguments || {});
-        (req as any).nv = ctx;
-      }
-      const toolName = params?.name;
-      const toolArgs = params?.arguments || {};
-      const result = await executeTool(toolName, toolArgs, req, ctx);
-      return sendResponse(200, {
-        jsonrpc: '2.0',
-        id,
-        result: {
-          content: [
-            {
-              type: 'text',
-              text: typeof result === 'string' ? result : JSON.stringify(result, null, 2),
-            },
-          ],
-        },
-      });
-    }
-
-    return sendResponse(404, {
-      jsonrpc: '2.0',
-      id,
-      error: { code: -32601, message: `Method "${method}" not found` },
-    });
-  } catch (err: any) {
-    const statusCode = err instanceof HttpError ? err.statusCode : (err.status || 500);
-    if (err.wwwAuthenticate || statusCode === 401) {
-      res.set(
-        'WWW-Authenticate',
-        `Bearer realm="Northveil", resource_metadata="https://mcp.northveil.xyz/.well-known/oauth-protected-resource"`
-      );
-    }
-    return sendResponse(statusCode, {
-      jsonrpc: '2.0',
-      id,
-      error: {
-        code: statusCode === 401 ? -32001 : statusCode === 403 ? -32003 : -32603,
-        message: err.message || 'Internal error',
-      },
-    });
-  }
-}
-
-app.post(['/mcp', '/sse'], handleMcpJsonRpc);
-
-app.post('/', async (req: Request, res: Response, next: NextFunction) => {
+app.post('/', express.json(), async (req: Request, res: Response, next: NextFunction) => {
   if (req.body && req.body.jsonrpc === '2.0') {
-    if (isPublicMcpMethod(req)) {
-      return handleMcpJsonRpc(req, res);
-    }
-    try {
-      (req as any).nv = await resolveContext(req);
-      return handleMcpJsonRpc(req, res);
-    } catch (e: any) {
-      res.set(
-        'WWW-Authenticate',
-        `Bearer realm="Northveil", resource_metadata="https://mcp.northveil.xyz/.well-known/oauth-protected-resource"`
-      );
-      return res.status(e.status || e.statusCode || 401).json({ error: e.message });
-    }
+    return handleMcpJsonRpc(req, res, req.body);
   }
   next();
 });
@@ -1924,11 +1517,14 @@ app.post('/wallet/import/finish', requireSession, async (req: Request, res: Resp
 });
 
 // POST /wallet/import - Direct plaintext key material import is strictly forbidden
-app.post('/wallet/import', requireSession, async (req: Request, res: Response) => {
-  return res.status(400).json({
-    error: 'RAW_MATERIAL_FORBIDDEN',
-    message: 'Direct plaintext key import is forbidden. Wallets must be imported via in-browser encryption to the Turnkey enclave using /wallet/import/begin and /wallet/import/finish.',
-  });
+app.post('/wallet/import', (req: Request, res: Response) => {
+  if (req.body?.mnemonic || req.body?.privateKey || req.body?.seed) {
+    return res.status(400).json({
+      error: 'RAW_MATERIAL_FORBIDDEN',
+      message: 'Use POST /wallet/import/begin then /wallet/import/finish with encryptedBundle only',
+    });
+  }
+  return res.status(400).json({ error: 'USE_BEGIN_FINISH' });
 });
 
 // GET /wallet/me - canonical authenticated user profile, active wallets, passkeys count, and next onboarding state

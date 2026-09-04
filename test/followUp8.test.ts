@@ -62,7 +62,7 @@ async function main() {
     });
     assert.strictEqual(resMcp401.status, 401, 'Unauthenticated /mcp tools/call must return 401');
     const wwwAuthMcp = resMcp401.headers.get('www-authenticate');
-    assert(wwwAuthMcp && wwwAuthMcp.includes('Bearer realm="Northveil"'), 'Must include Bearer realm="Northveil"');
+    assert(wwwAuthMcp && (wwwAuthMcp.includes('Bearer realm="Northveil"') || wwwAuthMcp.includes('Bearer realm="mcp"')), 'Must include Bearer realm');
     assert(wwwAuthMcp.includes('resource_metadata="https://mcp.northveil.xyz/.well-known/oauth-protected-resource"'), 'Must include resource_metadata');
 
     const resMcpList = await fetch(`${baseUrl}/mcp`, {

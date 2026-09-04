@@ -16,45 +16,40 @@ The AI never holds keys. The server never holds a full key. The agent proposes a
 
 ## ⚡ Transports Supported
 
-1. **HTTP JSON-RPC 2.0 (`POST /mcp`)**: Standard JSON-RPC tool router for AI agents and developer clients.
-2. **Server-Sent Events (`GET /sse` & `POST /message`)**: Bidirectional streaming transport for Claude Desktop and remote agents.
-3. **OpenAPI 3.0.3 Schema (`GET /openapi.json`)**: Direct integration for ChatGPT Actions and REST tooling.
-4. **Local stdio (`northveil-cli mcp`)**: Local subprocess transport for Claude Desktop and Cursor.
+1. **Universal Primary Connector (`POST /mcp`)**: Streamable HTTP JSON-RPC 2.0 gateway for Claude.ai, Claude Desktop, ChatGPT Apps (Developer mode), Cursor, Windsurf, and Claude Code (`https://mcp.northveil.xyz/mcp`).
+2. **Interactive In-Chat UI (MCP Apps)**: Built-in UI card resources (`ui://northveil/send`, `ui://northveil/swap`, `ui://northveil/deploy`, `ui://northveil/status`, `ui://northveil/read`) with MIME type `text/html;profile=mcp-app`.
+3. **Legacy Server-Sent Events (`GET /sse` & `POST /message`)**: Compatibility alias for legacy SSE clients (`https://mcp.northveil.xyz/sse`).
+4. **OpenAPI 3.0.3 Schema (`GET /openapi.json`)**: Schema integration for ChatGPT Actions and REST tooling.
+5. **Local stdio (`northveil-cli mcp`)**: Local subprocess transport for CLI workflows.
 
 ---
 
-## 🤖 1. Claude Desktop Setup
+## 🤖 1. Primary MCP Remote Connection
 
-Edit your Claude Desktop configuration file:
-- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- **Linux**: `~/.config/Claude/claude_desktop_config.json`
+### Universal Connection URL
+```
+https://mcp.northveil.xyz/mcp
+```
+> **Single Universal URL**: Same URL for every user. Authentication (OAuth 2.0 / Bearer token) binds directly to the user's primary vault. No `?wallet_address=` query parameter is needed.
 
+### Claude Desktop Configuration
+Edit `%APPDATA%\Claude\claude_desktop_config.json` (Windows) or `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
 ```json
 {
   "mcpServers": {
     "northveil": {
-      "command": "npx",
-      "args": ["-y", "northveil-cli", "mcp"],
-      "env": {
-        "NORTHVEIL_API_KEY": "YOUR_NORTHVEIL_CLIENT_KEY",
-        "NORTHVEIL_API_URL": "https://mcp.northveil.xyz"
-      }
+      "url": "https://mcp.northveil.xyz/mcp"
     }
   }
 }
 ```
 
-Or connect via Hosted SSE:
+Or connect via Legacy SSE:
 ```json
 {
   "mcpServers": {
-    "northveil-remote": {
-      "url": "https://mcp.northveil.xyz/sse",
-      "headers": {
-        "Authorization": "Bearer YOUR_NORTHVEIL_CLIENT_KEY",
-        "X-API-Key": "YOUR_NORTHVEIL_CLIENT_KEY"
-      }
+    "northveil-legacy-sse": {
+      "url": "https://mcp.northveil.xyz/sse"
     }
   }
 }
