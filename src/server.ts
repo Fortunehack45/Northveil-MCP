@@ -1502,13 +1502,11 @@ app.get('/auth/google/start', (req: Request, res: Response) => {
   const callbackUrl = getGoogleCallbackUrl(req);
 
   if (!clientId) {
-    if (req.headers.accept && req.headers.accept.includes('text/html')) {
-      try {
-        const targetUrl = new URL(redirect);
-        targetUrl.searchParams.set('error', 'GOOGLE_CLIENT_ID_NOT_CONFIGURED');
-        return res.redirect(targetUrl.toString());
-      } catch {}
-    }
+    try {
+      const targetUrl = new URL(redirect);
+      targetUrl.searchParams.set('error', 'GOOGLE_CLIENT_ID_NOT_CONFIGURED');
+      return res.redirect(targetUrl.toString());
+    } catch {}
     return res.status(500).json({
       error: 'GOOGLE_CLIENT_ID_NOT_CONFIGURED',
       message: 'Google OAuth Client ID is not configured. Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to Vercel environment variables.',

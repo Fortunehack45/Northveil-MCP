@@ -97,29 +97,39 @@ export function verifySessionToken(token: string): SessionPayload | null {
  * Helper to get active session without throwing
  */
 export function getSession(req: Request): SessionPayload | null {
-  let token: string | undefined;
+  // 1. Check X-Session-Token
+  if (typeof req.headers['x-session-token'] === 'string') {
+    const payload = verifySessionToken(req.headers['x-session-token'].trim());
+    if (payload) return payload;
+  }
+
+  // 2. Check Authorization: Bearer
+  const auth = req.headers.authorization;
+  if (auth && auth.startsWith('Bearer ')) {
+    const candidate = auth.slice(7).trim();
+    if (!candidate.startsWith('nv_live_') && !candidate.startsWith('nv_oauth_')) {
+      const payload = verifySessionToken(candidate);
+      if (payload) return payload;
+    }
+  }
+
+  // 3. Check cookies (nv_session)
   const cookieHeader = req.headers.cookie;
   if (cookieHeader) {
     const match = cookieHeader.match(/nv_session=([^;]+)/);
-    if (match) token = match[1];
-  }
-  if (!token) {
-    const auth = req.headers.authorization;
-    if (auth && auth.startsWith('Bearer ')) {
-      const candidate = auth.slice(7).trim();
-      if (!candidate.startsWith('nv_live_') && !candidate.startsWith('nv_oauth_')) {
-        token = candidate;
-      }
+    if (match) {
+      const payload = verifySessionToken(match[1]);
+      if (payload) return payload;
     }
   }
-  if (!token && typeof req.headers['x-session-token'] === 'string') {
-    token = req.headers['x-session-token'];
+
+  // 4. Check query sessionToken
+  if (typeof req.query?.sessionToken === 'string') {
+    const payload = verifySessionToken(req.query.sessionToken as string);
+    if (payload) return payload;
   }
-  if (!token && typeof req.query?.sessionToken === 'string') {
-    token = req.query.sessionToken as string;
-  }
-  if (!token) return null;
-  return verifySessionToken(token);
+
+  return null;
 }
 
 /**
@@ -128,11 +138,9 @@ export function getSession(req: Request): SessionPayload | null {
 export async function requireSession(req: Request, res: Response, next: NextFunction) {
   let token: string | undefined;
 
-  // 1. Check cookies (if cookie-parser is installed or parse raw cookie)
-  const cookieHeader = req.headers.cookie;
-  if (cookieHeader) {
-    const match = cookieHeader.match(/nv_session=([^;]+)/);
-    if (match) token = match[1];
+  // 1. Check X-Session-Token
+  if (typeof req.headers['x-session-token'] === 'string' && req.headers['x-session-token'].trim()) {
+    token = req.headers['x-session-token'].trim();
   }
 
   // 2. Check Authorization: Bearer
@@ -146,16 +154,34 @@ export async function requireSession(req: Request, res: Response, next: NextFunc
     }
   }
 
-  // 3. Check X-Session-Token
-  if (!token && typeof req.headers['x-session-token'] === 'string') {
-    token = req.headers['x-session-token'];
+  // 3. Check cookies (nv_session)
+  if (!token) {
+    const cookieHeader = req.headers.cookie;
+    if (cookieHeader) {
+      const match = cookieHeader.match(/nv_session=([^;]+)/);
+      if (match) token = match[1];
+    }
+  }
+
+  // 4. Fallback to query param
+  if (!token && typeof req.query?.sessionToken === 'string') {
+    token = req.query.sessionToken as string;
   }
 
   if (!token) {
     return res.status(401).json({ error: 'UNAUTHORIZED: Session token required' });
   }
 
-  const payload = verifySessionToken(token);
+  let payload = verifySessionToken(token);
+
+  // If initial token failed, check alternative headers
+  if (!payload && typeof req.headers['x-session-token'] === 'string') {
+    payload = verifySessionToken(req.headers['x-session-token'].trim());
+  }
+  if (!payload && req.headers.authorization?.startsWith('Bearer ')) {
+    payload = verifySessionToken(req.headers.authorization.slice(7).trim());
+  }
+
   if (!payload) {
     return res.status(401).json({ error: 'UNAUTHORIZED: Invalid or expired session' });
   }
