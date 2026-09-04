@@ -89,23 +89,25 @@ if (activeForbiddenEnvs.length > 0) {
 }
 
 app.use(cors({
-  origin: (origin, callback) => {
-    // Allow wallet web app and local developer tools
-    const allowed = [
-      'https://wallet.northveil.xyz',
-      'https://northveil.xyz',
-      'http://localhost:3000',
-      'http://localhost:5173',
-    ];
-    if (!origin || allowed.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(null, false);
-    }
+  origin: (_origin, callback) => {
+    // Open gateway for MCP protocol, tools, and OAuth discovery
+    callback(null, true);
   },
   credentials: true,
-  exposedHeaders: ['WWW-Authenticate'],
+  exposedHeaders: ['WWW-Authenticate', 'Content-Type', 'Authorization', 'Location'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'X-API-Key',
+    'Accept',
+    'Origin',
+    'WWW-Authenticate',
+    'mcp-session-id',
+    'last-event-id',
+  ],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'],
 }));
+app.options('*', cors());
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -113,19 +115,37 @@ app.use(express.urlencoded({ extended: true }));
 // -------------------------------------------------------------
 // Phase 3 — RFC 8414 & OAuth 2.0 Protected Resource Metadata
 // -------------------------------------------------------------
-app.get('/.well-known/oauth-protected-resource', (_req: Request, res: Response) => {
+const handleProtectedResourceMetadata = (req: Request, res: Response) => {
+  const canonical = 'https://mcp.northveil.xyz';
+  let resourceUrl = canonical;
+  if (req.query.resource && typeof req.query.resource === 'string') {
+    resourceUrl = req.query.resource;
+  } else if (req.originalUrl.includes('/mcp')) {
+    resourceUrl = `${canonical}/mcp`;
+  } else if (req.originalUrl.includes('/sse')) {
+    resourceUrl = `${canonical}/sse`;
+  }
+
   res.json({
-    resource: 'https://mcp.northveil.xyz',
-    authorization_servers: ['https://mcp.northveil.xyz'],
+    resource: resourceUrl,
+    authorization_servers: [canonical],
     scopes_supported: ['mcp'],
     bearer_methods_supported: ['header'],
-    resource_documentation: 'https://mcp.northveil.xyz',
+    resource_documentation: canonical,
     icon_uri: 'https://iili.io/CDS9fvn.png',
     logo_uri: 'https://iili.io/CDS9fvn.png',
   });
-});
+};
 
-app.get('/.well-known/oauth-authorization-server', (_req: Request, res: Response) => {
+app.get([
+  '/.well-known/oauth-protected-resource',
+  '/mcp/.well-known/oauth-protected-resource',
+  '/sse/.well-known/oauth-protected-resource',
+  '/.well-known/oauth-protected-resource/mcp',
+  '/.well-known/oauth-protected-resource/sse',
+], handleProtectedResourceMetadata);
+
+const handleAuthServerMetadata = (_req: Request, res: Response) => {
   const iss = 'https://mcp.northveil.xyz';
   res.json({
     issuer: iss,
@@ -134,13 +154,21 @@ app.get('/.well-known/oauth-authorization-server', (_req: Request, res: Response
     registration_endpoint: `${iss}/oauth/register`,
     code_challenge_methods_supported: ['S256'],
     grant_types_supported: ['authorization_code', 'refresh_token'],
-    token_endpoint_auth_methods_supported: ['none'],
+    token_endpoint_auth_methods_supported: ['none', 'client_secret_post', 'client_secret_basic'],
     response_types_supported: ['code'],
-    service_documentation: 'https://mcp.northveil.xyz',
+    service_documentation: iss,
     icon_uri: 'https://iili.io/CDS9fvn.png',
     logo_uri: 'https://iili.io/CDS9fvn.png',
   });
-});
+};
+
+app.get([
+  '/.well-known/oauth-authorization-server',
+  '/mcp/.well-known/oauth-authorization-server',
+  '/sse/.well-known/oauth-authorization-server',
+  '/.well-known/oauth-authorization-server/mcp',
+  '/.well-known/oauth-authorization-server/sse',
+], handleAuthServerMetadata);
 
 // Dynamic Client Registration (RFC 7591)
 app.post('/oauth/register', express.json(), async (req: Request, res: Response) => {
@@ -676,7 +704,7 @@ async function executeTool(name: string, args: Record<string, any>, req: Request
 // -------------------------------------------------------------
 // JSON-RPC 2.0 MCP Endpoint (POST /mcp)
 // -------------------------------------------------------------
-app.use('/mcp', async (req: Request, res: Response, next: NextFunction) => {
+app.use(['/mcp', '/sse'], async (req: Request, res: Response, next: NextFunction) => {
   if (req.method === 'OPTIONS') return next();
   try {
     (req as any).nv = await resolveContext(req);
@@ -692,7 +720,7 @@ app.use('/mcp', async (req: Request, res: Response, next: NextFunction) => {
   }
 });
 
-app.post('/mcp', async (req: Request, res: Response) => {
+async function handleMcpJsonRpc(req: Request, res: Response) {
   const { jsonrpc, id, method, params } = req.body || {};
 
   if (jsonrpc !== '2.0') {
@@ -789,6 +817,37 @@ app.post('/mcp', async (req: Request, res: Response) => {
       },
     });
   }
+}
+
+app.post(['/mcp', '/sse'], handleMcpJsonRpc);
+
+app.post('/', async (req: Request, res: Response, next: NextFunction) => {
+  if (req.body && req.body.jsonrpc === '2.0') {
+    try {
+      (req as any).nv = await resolveContext(req);
+      return handleMcpJsonRpc(req, res);
+    } catch (e: any) {
+      res.set(
+        'WWW-Authenticate',
+        `Bearer realm="Northveil", resource_metadata="https://mcp.northveil.xyz/.well-known/oauth-protected-resource"`
+      );
+      return res.status(e.status || e.statusCode || 401).json({ error: e.message });
+    }
+  }
+  next();
+});
+
+app.get('/mcp', async (req: Request, res: Response) => {
+  if (req.headers.accept && req.headers.accept.includes('text/event-stream')) {
+    return handleSseConnection(req, res);
+  }
+  return res.json({
+    status: 'ok',
+    system: 'Northveil MCP Streamable HTTP Gateway',
+    protocol: 'mcp',
+    transport: 'streamable-http',
+    version: '2.0.0',
+  });
 });
 
 // -------------------------------------------------------------
@@ -796,32 +855,42 @@ app.post('/mcp', async (req: Request, res: Response) => {
 // -------------------------------------------------------------
 const sseClients = new Map<string, { res: Response; ctx: any }>();
 
-app.get('/sse', async (req: Request, res: Response) => {
-  let ctx: any = null;
-  try {
-    ctx = await resolveContext(req);
-  } catch (e: any) {
-    res.set(
-      'WWW-Authenticate',
-      `Bearer realm="Northveil", resource_metadata="https://mcp.northveil.xyz/.well-known/oauth-protected-resource"`
-    );
-    return res.status(e.status || e.statusCode || 401).json({ error: e.message || 'UNAUTHORIZED' });
+async function handleSseConnection(req: Request, res: Response) {
+  let ctx: any = (req as any).nv;
+  if (!ctx) {
+    try {
+      ctx = await resolveContext(req);
+    } catch (e: any) {
+      res.set(
+        'WWW-Authenticate',
+        `Bearer realm="Northveil", resource_metadata="https://mcp.northveil.xyz/.well-known/oauth-protected-resource"`
+      );
+      return res.status(e.status || e.statusCode || 401).json({ error: e.message || 'UNAUTHORIZED' });
+    }
   }
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.flushHeaders();
 
   const sessionId = 'sse_' + crypto.randomUUID().replace(/-/g, '').slice(0, 16);
   sseClients.set(sessionId, { res, ctx });
 
-  res.write(`event: endpoint\ndata: /message?sessionId=${sessionId}\n\n`);
+  const host = req.get('host') || 'mcp.northveil.xyz';
+  const proto = req.protocol === 'https' || req.get('x-forwarded-proto') === 'https' ? 'https' : 'http';
+  const endpointUrl = `${proto}://${host}/message?sessionId=${sessionId}`;
+
+  res.write(`event: endpoint\ndata: ${endpointUrl}\n\n`);
 
   req.on('close', () => {
     sseClients.delete(sessionId);
   });
-});
+}
+
+app.get('/sse', handleSseConnection);
 
 app.post('/message', async (req: Request, res: Response) => {
   const sessionId = req.query.sessionId as string;
