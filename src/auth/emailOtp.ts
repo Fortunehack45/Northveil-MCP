@@ -248,10 +248,21 @@ export async function startEmailOtp(email: string, clientIp?: string): Promise<{
   }
 
   // 4. Send email
-  await sendEmailCode(normEmail, code);
+  const apiKey = process.env.RESEND_API_KEY;
+  const emailSent = await sendEmailCode(normEmail, code);
 
-  const echoDev = process.env.NODE_ENV !== 'production';
-  return { ok: true, ...(echoDev ? { devCode: code } : {}) };
+  const shouldEcho = !apiKey || !emailSent || process.env.NODE_ENV !== 'production';
+  return {
+    ok: true,
+    ...(shouldEcho
+      ? {
+          devCode: code,
+          deliveryNotice: !apiKey
+            ? 'RESEND_API_KEY is not configured in Vercel. Code is provided directly.'
+            : 'Resend dispatch failed. Code is provided directly.',
+        }
+      : {}),
+  };
 }
 
 /**
