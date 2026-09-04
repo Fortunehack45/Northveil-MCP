@@ -28,16 +28,35 @@ export interface SignResult {
   rawTransaction?: string;
 }
 
+export function isHosted(): boolean {
+  return process.env.NODE_ENV === 'production' || process.env.VERCEL === '1' || process.env.NORTHVEIL_HOSTED === '1';
+}
+
+export function allowOrgSign(): boolean {
+  // Local only, and only with an explicit escape hatch.
+  return !isHosted() && process.env.ALLOW_ORG_ROOT_SIGN === '1';
+}
+
 export interface MpcProvider {
   createWallet(userId: string): Promise<{ mpcWalletId: string; address: string }>;
   importBegin?(userId: string): Promise<{ importBundle: string; organizationId: string; userId: string }>;
   importFinish?(userId: string, input: { encryptedBundle: string; name?: string }): Promise<{ mpcWalletId: string; address: string }>;
   importWallet?(userId: string, input: { mnemonic?: string; privateKey?: string }): Promise<{ mpcWalletId: string; address: string }>;
   signAndBroadcast(req: SignRequest): Promise<SignResult>;
+  createSignActivity(req: SignRequest): Promise<{
+    activityId: string;
+    organizationId: string;
+    unsignedTransaction: string;
+  }>;
+  submitStampedActivity(input: {
+    activityId?: string;
+    stampedRequest: unknown;
+  }): Promise<{ signedTransaction: string }>;
+  broadcastSignedTx(chainId: number, signedTransaction: string): Promise<{ txHash: string }>;
 }
 
 export function getMpcProvider(): MpcProvider {
-  const hosted = process.env.NODE_ENV === 'production' || process.env.VERCEL === '1' || process.env.NORTHVEIL_HOSTED === '1';
+  const hosted = isHosted();
   if (hosted) {
     if (!process.env.TURNKEY_API_PUBLIC_KEY || !process.env.TURNKEY_API_PRIVATE_KEY || !process.env.TURNKEY_ORGANIZATION_ID) {
       throw new Error('FATAL: hosted Northveil requires Turnkey');
@@ -203,12 +222,21 @@ export function turnkeyProvider(): MpcProvider {
     },
 
     async signAndBroadcast(req: SignRequest): Promise<SignResult> {
-      if (process.env.TURNKEY_REQUIRE_USER_STAMP === '1') {
-        return {
-          txHash: '',
-          rawTransaction: '',
-          status: 'pending_user_stamp',
-        } as any;
+      // 1. Re-hash unsignedTx and compare with payloadHash
+      const recomputedHash = canonicalPayloadHash({
+        chain: `eip155:${req.unsignedTx.chainId}`,
+        to: req.unsignedTx.to,
+        valueWei: req.unsignedTx.value,
+        data: req.unsignedTx.data || '0x',
+        nonce: req.unsignedTx.nonce,
+      });
+
+      if (recomputedHash !== req.payloadHash) {
+        throw new Error('PAYLOAD_TAMPERING_DETECTED: Recomputed payload hash does not match approved hash.');
+      }
+
+      if (!allowOrgSign()) {
+        throw new Error('ORG_ROOT_SIGN_FORBIDDEN: hosted signing must use stampSignActivity + broadcastSignedTx');
       }
 
       const { TurnkeyClient } = await import('@turnkey/http');
@@ -223,19 +251,6 @@ export function turnkeyProvider(): MpcProvider {
         { baseUrl: process.env.TURNKEY_BASE_URL || 'https://api.turnkey.com' },
         stamper
       );
-
-      // 1. Re-hash unsignedTx and compare with payloadHash
-      const recomputedHash = canonicalPayloadHash({
-        chain: `eip155:${req.unsignedTx.chainId}`,
-        to: req.unsignedTx.to,
-        valueWei: req.unsignedTx.value,
-        data: req.unsignedTx.data || '0x',
-        nonce: req.unsignedTx.nonce,
-      });
-
-      if (recomputedHash !== req.payloadHash) {
-        throw new Error('PAYLOAD_TAMPERING_DETECTED: Recomputed payload hash does not match approved hash.');
-      }
 
       const organizationId = process.env.TURNKEY_ORGANIZATION_ID!;
       
@@ -286,12 +301,138 @@ export function turnkeyProvider(): MpcProvider {
         rawTransaction: signedTx,
       };
     },
+
+    async createSignActivity(req: SignRequest): Promise<{
+      activityId: string;
+      organizationId: string;
+      unsignedTransaction: string;
+    }> {
+      const recomputedHash = canonicalPayloadHash({
+        chain: `eip155:${req.unsignedTx.chainId}`,
+        to: req.unsignedTx.to,
+        valueWei: req.unsignedTx.value,
+        data: req.unsignedTx.data || '0x',
+        nonce: req.unsignedTx.nonce,
+      });
+
+      if (recomputedHash !== req.payloadHash) {
+        throw new Error('PAYLOAD_TAMPERING_DETECTED: Recomputed payload hash does not match approved hash.');
+      }
+
+      const tx = ethers.Transaction.from({
+        to: req.unsignedTx.to,
+        value: BigInt(req.unsignedTx.value),
+        data: req.unsignedTx.data || '0x',
+        chainId: req.unsignedTx.chainId,
+        nonce: req.unsignedTx.nonce,
+        gasLimit: req.unsignedTx.gasLimit ? BigInt(req.unsignedTx.gasLimit) : 21000n,
+        maxFeePerGas: req.unsignedTx.maxFeePerGas ? BigInt(req.unsignedTx.maxFeePerGas) : 1000000000n,
+        maxPriorityFeePerGas: req.unsignedTx.maxPriorityFeePerGas ? BigInt(req.unsignedTx.maxPriorityFeePerGas) : 1000000000n,
+        type: 2,
+      });
+
+      const unsignedSerialized = tx.unsignedSerialized;
+      const organizationId = process.env.TURNKEY_ORGANIZATION_ID || '';
+      let activityId = `act_${crypto.randomUUID().replace(/-/g, '')}`;
+
+      try {
+        if (process.env.TURNKEY_API_PUBLIC_KEY && process.env.TURNKEY_API_PRIVATE_KEY && organizationId) {
+          const { TurnkeyClient } = await import('@turnkey/http');
+          const { ApiKeyStamper } = await import('@turnkey/api-key-stamper');
+          const stamper = new ApiKeyStamper({
+            apiPublicKey: process.env.TURNKEY_API_PUBLIC_KEY,
+            apiPrivateKey: process.env.TURNKEY_API_PRIVATE_KEY,
+          });
+          const client = new TurnkeyClient(
+            { baseUrl: process.env.TURNKEY_BASE_URL || 'https://api.turnkey.com' },
+            stamper
+          );
+          const actResp = await (client as any).createActivity({
+            type: 'ACTIVITY_TYPE_SIGN_TRANSACTION_V2' as any,
+            organizationId,
+            parameters: {
+              signWith: req.mpcWalletId,
+              type: 'TRANSACTION_TYPE_ETHEREUM',
+              unsignedTransaction: unsignedSerialized,
+            } as any,
+            timestampMs: String(Date.now()),
+          });
+          if (actResp?.activity?.id) {
+            activityId = actResp.activity.id;
+          }
+        }
+      } catch {
+        // If Turnkey rejects org create, create the unsigned payload only and let browser start/stamp
+      }
+
+      return {
+        activityId,
+        organizationId,
+        unsignedTransaction: unsignedSerialized,
+      };
+    },
+
+    async submitStampedActivity(input: {
+      activityId?: string;
+      stampedRequest: unknown;
+    }): Promise<{ signedTransaction: string }> {
+      const organizationId = process.env.TURNKEY_ORGANIZATION_ID || '';
+      const stamped: any = input.stampedRequest;
+
+      // If client directly provided signed transaction
+      if (typeof stamped === 'object' && stamped?.signedTransaction) {
+        return { signedTransaction: stamped.signedTransaction };
+      }
+
+      // If client provided a stamped HTTP payload to post to Turnkey
+      if (typeof stamped === 'object' && stamped?.url && stamped?.stamp) {
+        const fetchRes = await fetch(stamped.url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Stamp': stamped.stamp,
+            ...(stamped.headers || {}),
+          },
+          body: typeof stamped.body === 'string' ? stamped.body : JSON.stringify(stamped.body),
+        });
+        const resJson: any = await fetchRes.json();
+        const activityId = resJson?.activity?.id || input.activityId;
+        if (activityId && process.env.TURNKEY_API_PUBLIC_KEY && process.env.TURNKEY_API_PRIVATE_KEY) {
+          const { TurnkeyClient } = await import('@turnkey/http');
+          const { ApiKeyStamper } = await import('@turnkey/api-key-stamper');
+          const stamper = new ApiKeyStamper({
+            apiPublicKey: process.env.TURNKEY_API_PUBLIC_KEY,
+            apiPrivateKey: process.env.TURNKEY_API_PRIVATE_KEY,
+          });
+          const client = new TurnkeyClient(
+            { baseUrl: process.env.TURNKEY_BASE_URL || 'https://api.turnkey.com' },
+            stamper
+          );
+          const pollSign = await client.getActivity({ organizationId, activityId });
+          const signed = (pollSign.activity.result as any)?.signTransactionResult?.signedTransaction;
+          if (signed) return { signedTransaction: signed };
+        }
+      }
+
+      if (typeof stamped === 'string' && stamped.startsWith('0x')) {
+        return { signedTransaction: stamped };
+      }
+
+      throw new Error('STAMPED_ACTIVITY_FAILED: Unable to extract signedTransaction from stamped activity');
+    },
+
+    async broadcastSignedTx(chainId: number, signedTransaction: string): Promise<{ txHash: string }> {
+      const rpcUrl = getRpcForChain(chainId);
+      const provider = new ethers.JsonRpcProvider(rpcUrl);
+      const broadcastResponse = await provider.broadcastTransaction(signedTransaction);
+      return { txHash: broadcastResponse.hash };
+    },
   };
 }
 
 function devMockProvider(): MpcProvider {
-  const hosted = process.env.NODE_ENV === 'production' || process.env.VERCEL === '1' || process.env.NORTHVEIL_HOSTED === '1';
-  if (hosted) {
+  const isHostedEnv = isHosted();
+  if (isHostedEnv) {
     throw new Error('SECURITY VIOLATION: Dev mock signer forbidden in hosted environment');
   }
 
@@ -335,9 +476,8 @@ function devMockProvider(): MpcProvider {
       };
     },
     async signAndBroadcast(req: SignRequest) {
-      const isHosted = process.env.NODE_ENV === 'production' || process.env.VERCEL === '1' || process.env.NORTHVEIL_HOSTED === '1';
-      if (isHosted) {
-        throw new Error('SECURITY VIOLATION: Dev mock signer forbidden in hosted environment');
+      if (isHosted() || !allowOrgSign()) {
+        throw new Error('ORG_ROOT_SIGN_FORBIDDEN: hosted signing must use stampSignActivity + broadcastSignedTx');
       }
 
       // Deterministic pseudo-hash for unit testing
@@ -346,6 +486,31 @@ function devMockProvider(): MpcProvider {
         txHash: fakeTxHash,
         rawTransaction: '0x' + Buffer.from('mock-signed-tx').toString('hex'),
       };
+    },
+    async createSignActivity(req: SignRequest) {
+      if (isHosted()) {
+        throw new Error('SECURITY VIOLATION: Dev mock signer forbidden in hosted environment');
+      }
+      return {
+        activityId: 'mock-activity-' + crypto.randomUUID(),
+        organizationId: 'mock-org-id',
+        unsignedTransaction: '0x02mockunsignedtx',
+      };
+    },
+    async submitStampedActivity(input: { activityId?: string; stampedRequest: unknown }) {
+      if (isHosted()) {
+        throw new Error('SECURITY VIOLATION: Dev mock signer forbidden in hosted environment');
+      }
+      const signedTx = (input.stampedRequest as any)?.signedTransaction ||
+        (typeof input.stampedRequest === 'string' && input.stampedRequest.startsWith('0x') ? input.stampedRequest : ('0x' + Buffer.from('mock-signed-tx-' + Date.now()).toString('hex')));
+      return { signedTransaction: signedTx };
+    },
+    async broadcastSignedTx(chainId: number, signedTransaction: string): Promise<{ txHash: string }> {
+      if (isHosted()) {
+        throw new Error('SECURITY VIOLATION: Dev mock signer forbidden in hosted environment');
+      }
+      const fakeTxHash = ethers.keccak256(ethers.toUtf8Bytes(signedTransaction + Date.now().toString()));
+      return { txHash: fakeTxHash };
     },
   };
 }

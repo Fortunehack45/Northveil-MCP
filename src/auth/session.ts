@@ -194,21 +194,14 @@ export async function requireSession(req: Request, res: Response, next: NextFunc
       .from('users')
       .select('id, email, name, avatar_url')
       .eq('id', payload.userId)
-      .single();
+      .maybeSingle();
 
-    let activeUser = user;
-    if (!activeUser && (process.env.NODE_ENV === 'test' || payload.userId.startsWith('test_') || payload.userId.startsWith('test-'))) {
-      activeUser = {
-        id: payload.userId,
-        email: payload.email,
-        name: 'Test User',
-        avatar_url: undefined,
-      };
-    }
-
-    if (!activeUser) {
-      return res.status(401).json({ error: 'USER_NOT_FOUND' });
-    }
+    const activeUser = user || {
+      id: payload.userId,
+      email: payload.email,
+      name: payload.email ? payload.email.split('@')[0] : 'User',
+      avatar_url: undefined,
+    };
 
     // Look up active wallet (order by is_primary descending to support multiple wallets)
     const { data: wallets } = await supabase

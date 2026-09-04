@@ -1,117 +1,66 @@
-# Northveil Universal Model Context Protocol (MCP) Server
 
-[![MCP Protocol](https://img.shields.io/badge/MCP-2024--11--05-blueviolet.svg?style=flat-square)](https://modelcontextprotocol.io/)
-[![Claude Desktop](https://img.shields.io/badge/Claude%20Desktop-Ready-orange.svg?style=flat-square)](https://claude.ai)
-[![Cursor IDE](https://img.shields.io/badge/Cursor%20IDE-Ready-purple.svg?style=flat-square)](https://cursor.sh)
-[![OpenAPI 3.0](https://img.shields.io/badge/OpenAPI-3.0.3-emerald.svg?style=flat-square)](https://swagger.io/specification/)
+# Northveil — Non-Custodial Agent Wallet & MCP Control Plane
 
-Non-custodial AI-agent wallet and Model Context Protocol (MCP) control plane.
+[![Live dApp](https://img.shields.io/badge/Live%20Wallet-wallet.northveil.xyz-blue.svg?style=flat-square)](https://wallet.northveil.xyz)
+[![MCP Gateway](https://img.shields.io/badge/MCP%20Gateway-mcp.northveil.xyz-purple.svg?style=flat-square)](https://mcp.northveil.xyz)
+[![npm SDK](https://img.shields.io/npm/v/northveil-sdk.svg?style=flat-square&color=blue)](https://www.npmjs.com/package/northveil-sdk)
+[![Developer CLI](https://img.shields.io/npm/v/northveil-cli.svg?style=flat-square&color=emerald)](https://www.npmjs.com/package/northveil-cli)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](https://opensource.org/licenses/MIT)
 
-### Security Architecture in Brief
-The AI never holds keys. The server never holds a full key. The agent proposes an operation via MCP. A server-side grant and policy engine evaluates permissions.
-- **Always Ask (Default)**: State-changing operations stage a `PendingApproval`. The human user verifies and signs via WebAuthn passkey at `https://wallet.northveil.xyz/approve/<id>`.
-- **Autonomous Mode (Opt-in)**: Transactions within pre-authorized spending caps, chain permissions, and recipient allowlists execute directly via threshold MPC enclaves.
+Northveil is a strictly non-custodial control plane and Model Context Protocol (MCP) server for AI agents (Claude Desktop, Cursor, custom autonomous agents).
 
----
-
-## ⚡ Transports Supported
-
-1. **Universal Primary Connector (`POST /mcp`)**: Streamable HTTP JSON-RPC 2.0 gateway for Claude.ai, Claude Desktop, ChatGPT Apps (Developer mode), Cursor, Windsurf, and Claude Code (`https://mcp.northveil.xyz/mcp`).
-2. **Interactive In-Chat UI (MCP Apps)**: Built-in UI card resources (`ui://northveil/send`, `ui://northveil/swap`, `ui://northveil/deploy`, `ui://northveil/status`, `ui://northveil/read`) with MIME type `text/html;profile=mcp-app`.
-3. **Legacy Server-Sent Events (`GET /sse` & `POST /message`)**: Compatibility alias for legacy SSE clients (`https://mcp.northveil.xyz/sse`).
-4. **OpenAPI 3.0.3 Schema (`GET /openapi.json`)**: Schema integration for ChatGPT Actions and REST tooling.
-5. **Local stdio (`northveil-cli mcp`)**: Local subprocess transport for CLI workflows.
+### Core Invariant
+> **The AI never holds keys. The server never holds a full key.**
+> The agent proposes an operation. A grant + policy engine decides if it can run. If approval is required, the user signs with a passkey. Signing happens by threshold MPC across isolated parties/TEEs. The agent only ever receives a derived result (tx hash, signature, scoped token) — never a private key, seed, or MPC share.
 
 ---
 
-## 🤖 1. Primary MCP Remote Connection
+## 🔌 Official MCP Gateway Endpoints
 
-### Universal Connection URL
-```
-https://mcp.northveil.xyz/mcp
-```
-> **Single Universal URL**: Same URL for every user. Authentication (OAuth 2.0 / Bearer token) binds directly to the user's primary vault. No `?wallet_address=` query parameter is needed.
+| Client | Role | URL / Command | Transport & Auth |
+| :--- | :--- | :--- | :--- |
+| **Claude.ai / Claude Desktop** | **Primary Connector** | `https://mcp.northveil.xyz/mcp` | Streamable HTTP • OAuth 2.0 (RFC 8414) |
+| **ChatGPT Apps (Developer mode)** | **Primary Connector** | `https://mcp.northveil.xyz/mcp` | Streamable HTTP • OAuth 2.0 (RFC 8414) |
+| **Cursor / Windsurf / Claude Code** | **Primary Remote** | `https://mcp.northveil.xyz/mcp` | Streamable HTTP • Bearer Token |
+| **Legacy SSE Clients** | Optional Compatibility | `https://mcp.northveil.xyz/sse` | Server-Sent Events (SSE) |
+| **Local Stdio Transport** | CLI Bridge | `npx -y northveil-cli mcp` | stdio (JSON-RPC 2.0) |
 
-### Claude Desktop Configuration
-Edit `%APPDATA%\Claude\claude_desktop_config.json` (Windows) or `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
-```json
-{
-  "mcpServers": {
-    "northveil": {
-      "url": "https://mcp.northveil.xyz/mcp"
-    }
-  }
-}
-```
+> **Single Universal URL**: `https://mcp.northveil.xyz/mcp` is the universal endpoint for every user. User authentication (OAuth 2.0 / Bearer token) binds directly to the user's primary vault. No `?wallet_address=` query parameter is needed in the URL.
 
-Or connect via Legacy SSE:
-```json
-{
-  "mcpServers": {
-    "northveil-legacy-sse": {
-      "url": "https://mcp.northveil.xyz/sse"
-    }
-  }
-}
+---
+
+## 🛡️ Interactive In-Chat UI (MCP Apps)
+Northveil serves interactive cards conforming to the MCP Apps specification (`text/html;profile=mcp-app`):
+- `ui://northveil/send` — In-chat transfer approval card
+- `ui://northveil/swap` — In-chat token swap staging card
+- `ui://northveil/deploy` — In-chat smart contract deployment & execution card
+- `ui://northveil/status` — Live spend request polling & transaction confirmation card
+- `ui://northveil/read` — Vault balances and multi-chain portfolio rollups
+
+Tool responses return `_meta.ui.resourceUri` so supporting clients render cards directly in the conversation. pure-text clients cleanly fallback to standard markdown text.
+
+## 🏛️ Ecosystem Monorepo Architecture
+
+```
+Northveil/
+├── mcp-server/                   # Non-custodial MCP Gateway (HTTP, SSE, OpenAPI, stdio)
+│   ├── src/                      # Modular control plane (grantEngine, approvals, passkey, mpcAdapter)
+│   ├── test/                     # Security and policy invariant test suites
+│   └── supabase/                 # Non-custodial PostgreSQL schema & RLS policies
+├── sdk/                          # Official TypeScript / JavaScript Client (npm: northveil-sdk)
+├── wallet/                       # Next.js App Router biometric passkey control plane (wallet.northveil.xyz)
+├── docs/                         # Protocol architecture specifications & database schemas
+└── supabase/                     # Supabase migrations & row-level security
 ```
 
 ---
 
-## 💻 2. Cursor IDE Configuration
+## 🔐 Non-Custodial MPC Control-Plane Architecture
 
-1. In Cursor, open **Settings** ➔ **Features** ➔ **MCP Servers**.
-2. Click **+ Add New MCP Server**.
-3. Set **Type** to `command` and enter:
-   ```bash
-   npx -y northveil-cli mcp
-   ```
-4. Set environment variables:
-   - `NORTHVEIL_API_KEY`: `YOUR_NORTHVEIL_CLIENT_KEY`
-   - `NORTHVEIL_API_URL`: `https://mcp.northveil.xyz`
-
----
-
-## 🌐 3. ChatGPT Actions & Custom GPTs Setup
-
-1. In ChatGPT GPT Builder, navigate to **Configure** ➔ **Actions** ➔ **Create new action**.
-2. Paste Schema URL: `https://mcp.northveil.xyz/openapi.json`.
-3. Set Authentication: **API Key** (Header: `X-API-Key`).
-4. Enter your Northveil client key. Approvals are completed by the human via WebAuthn passkey at `https://wallet.northveil.xyz`.
-
----
-
-## 🐳 4. Deployment
-
-```bash
-git clone https://github.com/Fortunehack45/Northveil-MCP.git
-cd Northveil-MCP
-npm install
-npm run build
-npm start
-```
-
-### Environment Variables
-```ini
-PORT=3001
-SUPABASE_URL=https://YOUR_PROJECT.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=YOUR_SERVICE_ROLE_KEY
-TURNKEY_API_PUBLIC_KEY=
-TURNKEY_API_PRIVATE_KEY=
-TURNKEY_ORGANIZATION_ID=
-WEBAUTHN_RP_ID=wallet.northveil.xyz
-WEBAUTHN_ORIGIN=https://wallet.northveil.xyz
-```
-
-> **Security Note**: The server will refuse to start in production if `PRIVATE_KEY`, `SEPOLIA_PRIVATE_KEY`, or `ETH_PRIVATE_KEY` is set.
-
----
-
-## 🔒 Non-Custodial Invariants
-
-- No private keys or seed phrases exist on the server or database.
-- Agent client keys (`nv_live_...`) are capability tokens stored as Argon2/cryptographic hashes.
-- All spending policies are enforced server-side.
-- Approvals are single-use and bound to `sha256(canonicalUnsignedTx)`.
+1. **Zero Server-Side Private Key Storage**: Northveil does not store your seed; Turnkey holds key material. No private keys, seed phrases, or MPC secret shares exist on the server, in memory as long-lived secrets, in Postgres, in environment variables, or in git.
+2. **WebAuthn Biometric Passkey Gating**: Operations under *Always Ask* mode generate single-use approval tickets with 10-minute TTL. The challenge commits cryptographically to `sha256(canonicalUnsignedTx)`.
+3. **Autonomous Agent Spending Scopes**: Users grant AI agents scoped operational budgets with maximum per-transaction caps, rolling 24-hour daily limits, and recipient allowlists. Non-zero calldata is forbidden in autonomous mode.
+4. **Isolated Threshold MPC**: Signing occurs inside hardware-isolated enclaves (Turnkey TEE partitions) upon validation of policy and cryptographic passkey assertion evidence. On hosted environments, Northveil cannot sign with the operator key alone; the code throws `ORG_ROOT_SIGN_FORBIDDEN` unless stamped by the user or scoped delegate (see [SECURITY.md](file:///c:/Users/USER%20PC/Desktop/Northveil/SECURITY.md)).
 
 ---
 

@@ -8,6 +8,7 @@ import { getTransactionStatus } from './getTransactionStatus.js';
 import { listPositions, placePosition, cancelPosition } from './positions.js';
 import { getRequest, submitIntent } from '../wallet/requestLifecycle.js';
 import { resolveContext, HttpError, ToolContext } from '../auth/resolveContext.js';
+import { isHosted } from '../wallet/mpcAdapter.js';
 import { supabase } from '../supabase.js';
 
 export async function executeTool(name: string, args: Record<string, any>, req: Request, providedCtx?: any) {
@@ -177,6 +178,15 @@ export async function executeTool(name: string, args: Record<string, any>, req: 
       return await cancelPosition(ctx, args.positionId);
 
     case 'nv_set_autonomous_mode': {
+      if (isHosted()) {
+        const delegateKey = (ctx.grant as any)?.delegate_turnkey_public_key || (ctx.grant as any)?.delegatePublicKey;
+        if (!delegateKey) {
+          return {
+            error: 'AUTONOMOUS_REQUIRES_DELEGATE_KEY',
+            message: 'Hosted autonomous signing requires a scoped delegate key in Turnkey sub-org. Org-root key cannot be used.',
+          };
+        }
+      }
       // Updates agent grant to autonomous mode if within policy
       return {
         requestId: 'req_grant_' + Date.now(),

@@ -23,10 +23,20 @@ export function allowedOrigins(): string[] {
     'https://wallet.northveil.xyz',
     'https://northveil.xyz',
     'https://www.northveil.xyz',
+    'https://apex.northveil.xyz',
     'http://localhost:5173',
     'http://127.0.0.1:5173',
+    'http://localhost:3000',
+    'http://localhost:8080',
     ...extra,
   ];
+}
+
+export function asWebAuthnCredentialJSON(body: any) {
+  const raw = body?.response ?? body?.credential ?? body;
+  if (raw?.response?.clientDataJSON) return raw;
+  if (raw?.response?.response?.clientDataJSON) return raw.response;
+  throw new Error('PASSKEY_RESPONSE_MALFORMED');
 }
 
 export interface StoredAuthenticator {

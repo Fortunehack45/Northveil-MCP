@@ -9,9 +9,9 @@ import { prepareTransfer } from './tools/prepareTransfer.js';
 import { getPortfolio } from './tools/getPortfolio.js';
 import { getTransactionStatus } from './tools/getTransactionStatus.js';
 import { consumeApproval, getApproval, getApprovalAsync } from './wallet/approvals.js';
-import { verifyPasskeyForPayload } from './auth/passkey.js';
-import { getMpcProvider } from './wallet/mpcAdapter.js';
-import { submitIntent, getRequest, loadRequest, updateRequest, insertSignPermit, signAndAdvance } from './wallet/requestLifecycle.js';
+import { verifyPasskeyForPayload, asWebAuthnCredentialJSON } from './auth/passkey.js';
+import { getMpcProvider, isHosted, allowOrgSign } from './wallet/mpcAdapter.js';
+import { submitIntent, getRequest, loadRequest, updateRequest, insertSignPermit, signAndAdvance, assertSignPermit } from './wallet/requestLifecycle.js';
 import { setAutonomousMode } from './tools/setAutonomousMode.js';
 import { issueClientKey } from './auth/agentClient.js';
 import { supabase } from './supabase.js';
@@ -805,12 +805,48 @@ async function handleApprovalCompletion(req: Request, res: Response) {
     }
 
     // 6. Insert single-use sign permit only after passkey verification succeeds
-    await insertSignPermit(boundMpcWalletId, ticket.payloadHash);
+    await insertSignPermit(boundMpcWalletId, ticket.payloadHash, 10 * 60 * 1000, approvalId);
 
-    // 7. Request lifecycle transition: pending_approval -> pending_signature
+    const reqRec = await loadRequest(approvalId);
+
+    // 7. Hosted Northveil must not sign with operator root key
+    if (isHosted() || !allowOrgSign()) {
+      const signAct = await getMpcProvider().createSignActivity({
+        mpcWalletId: boundMpcWalletId,
+        unsignedTx: reqRec?.canonical_tx as any || (ticket as any)?.canonicalTx || {},
+        payloadHash: ticket.payloadHash,
+        approvalEvidence: {
+          type: 'passkey',
+          approvalId,
+        },
+      });
+
+      await updateRequest(approvalId, {
+        status: 'pending_user_stamp' as any,
+      });
+
+      await logAudit({
+        userId: ticket.userId || 'anonymous',
+        walletAddress: ticket.walletAddress,
+        clientId: ticket.clientId,
+        action: 'APPROVAL_VERIFIED_PENDING_USER_STAMP',
+        details: { approvalId, activityId: signAct.activityId },
+      });
+
+      return res.json({
+        ok: true,
+        requestId: approvalId,
+        status: 'pending_user_stamp',
+        activityId: signAct.activityId,
+        organizationId: signAct.organizationId,
+        unsignedTransaction: signAct.unsignedTransaction,
+        payloadHash: ticket.payloadHash,
+        approveStampUrl: `https://wallet.northveil.xyz/approve/${approvalId}/stamp`,
+      });
+    }
+
+    // 8. Local dev only with explicit ALLOW_ORG_ROOT_SIGN=1
     await updateRequest(approvalId, { status: 'pending_signature' });
-
-    // 8. Threshold sign exact canonical bytes with Turnkey MPC provider
     const out = await signAndAdvance(approvalId, 'passkey');
 
     await logAudit({
@@ -887,6 +923,7 @@ app.get('/wallet/requests/:id', async (req: Request, res: Response) => {
       walletId: record.wallet_id,
       payloadHash: record.payload_hash,
       approveUrl: record.approve_url,
+      stampUrl: record.status === 'pending_user_stamp' ? `https://wallet.northveil.xyz/approve/${record.id}/stamp` : undefined,
       txHash: record.tx_hash,
       error: record.error,
       expiresAt: record.expires_at,
@@ -895,6 +932,88 @@ app.get('/wallet/requests/:id', async (req: Request, res: Response) => {
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }
+});
+
+// GET /wallet/requests/:id/stamp-payload - returns unsigned tx and activity info for client stamping
+app.get('/wallet/requests/:id/stamp-payload', async (req: Request, res: Response) => {
+  const row = await loadRequest(req.params.id);
+  if (!row) return res.status(404).json({ error: 'REQUEST_NOT_FOUND' });
+  const organizationId = process.env.TURNKEY_ORGANIZATION_ID || 'turnkey_org_default';
+  let unsignedTx = '0x';
+  if (row.canonical_tx) {
+    try {
+      const { ethers } = await import('ethers');
+      unsignedTx = ethers.Transaction.from({
+        to: row.canonical_tx.to,
+        value: BigInt(row.canonical_tx.value || '0'),
+        data: row.canonical_tx.data || '0x',
+        chainId: row.canonical_tx.chainId || 8453,
+        nonce: row.canonical_tx.nonce || 0,
+        gasLimit: row.canonical_tx.gasLimit ? BigInt(row.canonical_tx.gasLimit) : 21000n,
+        maxFeePerGas: row.canonical_tx.maxFeePerGas ? BigInt(row.canonical_tx.maxFeePerGas) : 1000000000n,
+        maxPriorityFeePerGas: row.canonical_tx.maxPriorityFeePerGas ? BigInt(row.canonical_tx.maxPriorityFeePerGas) : 1000000000n,
+        type: 2,
+      }).unsignedSerialized;
+    } catch {}
+  }
+  return res.json({
+    activityId: (row as any).turnkey_activity_id || `act_${row.id}`,
+    unsignedTransaction: (row as any).unsigned_transaction || unsignedTx,
+    organizationId,
+    payloadHash: row.payload_hash,
+  });
+});
+
+// POST /wallet/turnkey/stamp - return stamp payload for activityId or requestId
+app.post('/wallet/turnkey/stamp', async (req: Request, res: Response) => {
+  const { activityId, requestId } = req.body || {};
+  const id = requestId || activityId;
+  const row = await loadRequest(id);
+  if (!row) return res.status(404).json({ error: 'REQUEST_NOT_FOUND' });
+  const organizationId = process.env.TURNKEY_ORGANIZATION_ID || 'turnkey_org_default';
+  let unsignedTx = '0x';
+  if (row.canonical_tx) {
+    try {
+      const { ethers } = await import('ethers');
+      unsignedTx = ethers.Transaction.from({
+        to: row.canonical_tx.to,
+        value: BigInt(row.canonical_tx.value || '0'),
+        data: row.canonical_tx.data || '0x',
+        chainId: row.canonical_tx.chainId || 8453,
+        nonce: row.canonical_tx.nonce || 0,
+        gasLimit: row.canonical_tx.gasLimit ? BigInt(row.canonical_tx.gasLimit) : 21000n,
+        maxFeePerGas: row.canonical_tx.maxFeePerGas ? BigInt(row.canonical_tx.maxFeePerGas) : 1000000000n,
+        maxPriorityFeePerGas: row.canonical_tx.maxPriorityFeePerGas ? BigInt(row.canonical_tx.maxPriorityFeePerGas) : 1000000000n,
+        type: 2,
+      }).unsignedSerialized;
+    } catch {}
+  }
+  return res.json({
+    ok: true,
+    activityId: activityId || (row as any).turnkey_activity_id || `act_${row.id}`,
+    requestId: row.id,
+    organizationId,
+    unsignedTransaction: (row as any).unsigned_transaction || unsignedTx,
+    payloadHash: row.payload_hash,
+  });
+});
+
+// POST /wallet/requests/:id/stamp-complete - user stamped activity submission and broadcast
+app.post(['/wallet/requests/:id/stamp-complete', '/api/approvals/:id/stamp-complete'], requireSession, async (req: Request, res: Response) => {
+  const row = await loadRequest(req.params.id);
+  if (!row) return res.status(404).json({ error: 'REQUEST_NOT_FOUND' });
+  if (row.user_id && req.session?.userId && row.user_id !== req.session.userId) {
+    return res.status(403).json({ error: 'FORBIDDEN' });
+  }
+  await assertSignPermit(row.id);
+  const chainId = row.canonical_tx?.chainId || (row as any).chain_id || 8453;
+  const { signedTransaction } = await getMpcProvider().submitStampedActivity({
+    activityId: req.body?.activityId || (row as any).turnkey_activity_id || `act_${row.id}`,
+    stampedRequest: req.body?.stampedRequest || req.body,
+  });
+  const { txHash } = await getMpcProvider().broadcastSignedTx(chainId, signedTransaction);
+  await updateRequest(row.id, { status: 'broadcast' as any, tx_hash: txHash });
+  return res.json({ ok: true, txHash, status: 'broadcast' });
 });
 
 // -------------------------------------------------------------
@@ -1243,6 +1362,14 @@ app.post('/auth/passkey/register/finish', async (req: Request, res: Response) =>
   if (!userId) {
     return res.status(401).json({ error: 'SESSION_REQUIRED' });
   }
+
+  let cred: any;
+  try {
+    cred = asWebAuthnCredentialJSON(req.body);
+  } catch (err: any) {
+    return res.status(400).json({ error: 'PASSKEY_RESPONSE_MALFORMED', message: err.message });
+  }
+
   const challenge = await consumeWebauthnChallenge({ userId, kind: 'reg' });
   if (!challenge) {
     return res.status(400).json({ error: 'CHALLENGE_EXPIRED_OR_NOT_FOUND' });
@@ -1250,7 +1377,7 @@ app.post('/auth/passkey/register/finish', async (req: Request, res: Response) =>
   try {
     const clientHostname = req.body?.hostname || (req.headers.origin ? new URL(req.headers.origin as string).hostname : req.hostname);
     const verified = await verifyPasskeyRegistration({
-      response: req.body?.response || req.body,
+      response: cred,
       expectedChallenge: challenge,
       origin: req.headers.origin as string,
       hostname: clientHostname,
@@ -1269,7 +1396,7 @@ app.post('/auth/passkey/register/finish', async (req: Request, res: Response) =>
       credentialId: verified.credentialId,
       credentialPublicKey: verified.credentialPublicKey,
       counter: verified.counter,
-      transports: req.body?.response?.transports,
+      transports: req.body?.response?.transports || cred?.response?.transports,
       walletIds: existingWalletIds,
     });
     return res.json({ success: true, credentialId: verified.credentialId });
@@ -1293,8 +1420,15 @@ app.post('/auth/passkey/login/begin', async (req: Request, res: Response) => {
 });
 
 app.post('/auth/passkey/login/finish', async (req: Request, res: Response) => {
-  const { credentialId, response, challenge } = req.body;
-  const credId = credentialId || response?.id;
+  let cred: any;
+  try {
+    cred = asWebAuthnCredentialJSON(req.body);
+  } catch (err: any) {
+    return res.status(400).json({ error: 'PASSKEY_RESPONSE_MALFORMED', message: err.message });
+  }
+
+  const { credentialId, challenge } = req.body || {};
+  const credId = credentialId || cred?.id;
   if (!credId) {
     return res.status(400).json({ error: 'CREDENTIAL_ID_REQUIRED' });
   }
@@ -1306,9 +1440,9 @@ app.post('/auth/passkey/login/finish', async (req: Request, res: Response) => {
   let expectedChallenge = challenge;
   if (!expectedChallenge) {
     let rawChallenge: string | undefined;
-    if (response?.clientDataJSON) {
+    if (cred?.response?.clientDataJSON) {
       try {
-        rawChallenge = JSON.parse(Buffer.from(response.clientDataJSON, 'base64url').toString('utf8')).challenge;
+        rawChallenge = JSON.parse(Buffer.from(cred.response.clientDataJSON, 'base64url').toString('utf8')).challenge;
       } catch {}
     }
     const consumed = await consumeWebauthnChallenge({
@@ -1322,7 +1456,7 @@ app.post('/auth/passkey/login/finish', async (req: Request, res: Response) => {
   try {
     const clientHostname = req.body?.hostname || (req.headers.origin ? new URL(req.headers.origin as string).hostname : req.hostname);
     await verifyPasskeyLogin({
-      response: response || req.body,
+      response: cred,
       expectedChallenge: expectedChallenge || '',
       storedAuthenticator: {
         credentialID: Buffer.from(passkey.credential_id, 'base64url'),
@@ -1572,12 +1706,14 @@ app.get('/wallet/me', requireSession, async (req: Request, res: Response) => {
       safeWallets.length === 0 && safePasskeyCount === 0 ? 'enroll_passkey' :
       safeWallets.length === 0 ? 'create_or_import' :
       safePasskeyCount === 0 ? 'enroll_passkey' :
+      req.session?.passkeyOk ? 'dashboard' :
       'unlock_passkey';
 
     return res.json({
       user: { id: user.id, email: user.email },
       wallets: safeWallets,
       passkeyCount: safePasskeyCount,
+      passkeyOk: Boolean(req.session?.passkeyOk),
       next,
       wallet: safeWallets[0] || null,
       authenticated: true,

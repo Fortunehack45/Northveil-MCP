@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { supabase } from '../supabase.js';
 import { ToolContext, ToolWallet } from '../auth/resolveContext.js';
 import { canonicalPayloadHash, evaluateGrant } from '../policy/grantEngine.js';
-import { getMpcProvider } from './mpcAdapter.js';
+import { getMpcProvider, isHosted, allowOrgSign } from './mpcAdapter.js';
 import { logAudit } from '../audit/log.js';
 import { createApproval, consumeApproval } from './approvals.js';
 import { ethers } from 'ethers';
@@ -10,10 +10,22 @@ import { ethers } from 'ethers';
 export type AgentRequestStatus =
   | 'pending_approval'
   | 'pending_signature'
+  | 'pending_user_stamp'
+  | 'broadcast'
   | 'pending_confirmation'
   | 'success'
   | 'denied'
   | 'error';
+
+export interface Stamp {
+  activityId?: string;
+  stampedRequest?: unknown;
+  delegateGrantId?: string;
+}
+
+export async function loadDelegateSecret(_grantId: string): Promise<string | null> {
+  return null;
+}
 
 export interface AgentRequest {
   id: string;
@@ -44,17 +56,23 @@ export const inMemorySignPermits = new Map<string, { id: string; mpcWalletId: st
 export async function insertSignPermit(
   mpcWalletId: string,
   payloadHash: string,
-  ttlMs = 5 * 60 * 1000
+  ttlMs = 10 * 60 * 1000,
+  requestId?: string
 ): Promise<string> {
-  const permitId = 'perm_' + crypto.randomBytes(16).toString('hex');
+  const permitId = crypto.randomUUID();
   const expiresAt = new Date(Date.now() + ttlMs);
 
-  inMemorySignPermits.set(`${mpcWalletId}:${payloadHash}`, {
+  const entry = {
     id: permitId,
     mpcWalletId,
     payloadHash,
     expiresAt,
-  });
+  };
+
+  inMemorySignPermits.set(`${mpcWalletId}:${payloadHash}`, entry);
+  if (requestId) {
+    inMemorySignPermits.set(requestId, entry);
+  }
 
   const { error: insertError } = await supabase.from('sign_permits').insert({
     id: permitId,
@@ -64,8 +82,7 @@ export async function insertSignPermit(
   });
 
   if (insertError) {
-    const isHosted = process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL) || process.env.NORTHVEIL_HOSTED === '1';
-    if (isHosted) {
+    if (isHosted()) {
       throw new Error(`SIGN_PERMIT_PERSISTENCE_FAILED: ${insertError.message}`);
     }
   }
@@ -77,20 +94,34 @@ export async function insertSignPermit(
  * Atomically consumes a single-use sign permit.
  * The MPC signer refuses to sign unless this returns true.
  */
-export async function assertSignPermit(mpcWalletId: string, payloadHash: string): Promise<void> {
+export async function assertSignPermit(identifierOrMpcWalletId: string, payloadHash?: string): Promise<void> {
   const nowIso = new Date().toISOString();
-  const cacheKey = `${mpcWalletId}:${payloadHash}`;
+  let mpcWalletId = identifierOrMpcWalletId;
+  let hash = payloadHash;
+
+  if (!hash) {
+    // Treat identifierOrMpcWalletId as requestId
+    const req = await loadRequest(identifierOrMpcWalletId);
+    if (req) {
+      mpcWalletId = req.mpc_wallet_id || req.wallet_id;
+      hash = req.payload_hash;
+    }
+  }
+
+  const cacheKey = hash ? `${mpcWalletId}:${hash}` : identifierOrMpcWalletId;
 
   // 1. Check in-memory store
-  const cached = inMemorySignPermits.get(cacheKey);
+  const cached = inMemorySignPermits.get(cacheKey) || inMemorySignPermits.get(identifierOrMpcWalletId);
   if (cached) {
     inMemorySignPermits.delete(cacheKey);
+    inMemorySignPermits.delete(identifierOrMpcWalletId);
+    if (hash) inMemorySignPermits.delete(`${cached.mpcWalletId}:${cached.payloadHash}`);
     try {
       await supabase
         .from('sign_permits')
         .delete()
-        .eq('mpc_wallet_id', mpcWalletId)
-        .eq('payload_hash', payloadHash);
+        .eq('mpc_wallet_id', cached.mpcWalletId)
+        .eq('payload_hash', cached.payloadHash);
     } catch {}
     if (cached.expiresAt > new Date()) {
       return;
@@ -98,20 +129,22 @@ export async function assertSignPermit(mpcWalletId: string, payloadHash: string)
   }
 
   // 2. Check Supabase table atomically with DELETE ... RETURNING
-  try {
-    const { data } = await supabase
-      .from('sign_permits')
-      .delete()
-      .eq('mpc_wallet_id', mpcWalletId)
-      .eq('payload_hash', payloadHash)
-      .gt('expires_at', nowIso)
-      .select('id')
-      .maybeSingle();
+  if (hash) {
+    try {
+      const { data } = await supabase
+        .from('sign_permits')
+        .delete()
+        .eq('mpc_wallet_id', mpcWalletId)
+        .eq('payload_hash', hash)
+        .gt('expires_at', nowIso)
+        .select('id')
+        .maybeSingle();
 
-    if (data) {
-      return;
-    }
-  } catch {}
+      if (data) {
+        return;
+      }
+    } catch {}
+  }
 
   throw new Error('NO_SIGN_PERMIT: Refusing to sign without an active, single-use approval permit');
 }
@@ -438,6 +471,15 @@ export async function submitIntent(
   }
 
   if (isAutonomous) {
+    if (isHosted() && !(ctx.grant as any)?.delegate_turnkey_public_key && !(ctx.grant as any)?.delegatePublicKey) {
+      await updateRequest(requestId, { status: 'error', error: 'AUTONOMOUS_REQUIRES_DELEGATE_KEY' });
+      return {
+        requestId,
+        status: 'error',
+        reason: 'AUTONOMOUS_REQUIRES_DELEGATE_KEY',
+      };
+    }
+
     // Autonomous execution: verify signer bound, insert permit, advance to pending_signature, then sign
     try {
       let mpcWalletId = (wallet as any)?.mpc_wallet_id || (wallet as any)?.mpcWalletId;
@@ -463,9 +505,9 @@ export async function submitIntent(
       const outcome = await signAndAdvance(requestId, (ctx.grant as any)?.mode || 'autonomous');
       return {
         requestId,
-        status: 'success',
+        status: outcome.status,
         txHash: outcome.txHash,
-        explorerUrl: built.chainIdNum === 8453 ? `https://basescan.org/tx/${outcome.txHash}` : `https://sepolia.etherscan.io/tx/${outcome.txHash}`,
+        explorerUrl: outcome.txHash ? (built.chainIdNum === 8453 ? `https://basescan.org/tx/${outcome.txHash}` : `https://sepolia.etherscan.io/tx/${outcome.txHash}`) : undefined,
         approvalId: requestId,
         payloadHash,
       };
@@ -495,6 +537,7 @@ export async function getRequest(requestId: string): Promise<{
   requestId: string;
   status: AgentRequestStatus;
   approveUrl?: string;
+  stampUrl?: string;
   txHash?: string;
   explorerUrl?: string;
   error?: string;
@@ -512,11 +555,13 @@ export async function getRequest(requestId: string): Promise<{
 
   const chainId = req.canonical_tx?.chainId;
   const explorerBase = chainId === 8453 ? 'https://basescan.org/tx/' : 'https://sepolia.etherscan.io/tx/';
+  const stampUrl = req.status === 'pending_user_stamp' ? `https://wallet.northveil.xyz/approve/${req.id}/stamp` : undefined;
 
   return {
     requestId: req.id,
     status: req.status,
     approveUrl: req.approve_url || undefined,
+    stampUrl,
     txHash: req.tx_hash || undefined,
     explorerUrl: req.tx_hash ? `${explorerBase}${req.tx_hash}` : undefined,
     error: req.error || undefined,
@@ -531,62 +576,74 @@ export async function getRequest(requestId: string): Promise<{
  */
 export async function signAndAdvance(
   requestId: string,
-  grantMode = 'passkey'
+  stamp?: Stamp | string
 ): Promise<{ requestId: string; status: AgentRequestStatus; txHash?: string }> {
-  const req = await loadRequest(requestId);
-  if (!req) throw new Error('REQUEST_NOT_FOUND');
-  if (req.status !== 'pending_signature') throw new Error('NOT_SIGNABLE: Request status is not pending_signature');
-
-  // Load wallet for this request - NO FALLBACK to turnkey_wallet!
-  let mpcWalletId: string | undefined;
-  try {
-    const { data: walletData } = await supabase
-      .from('wallets')
-      .select('mpc_wallet_id')
-      .eq('id', req.wallet_id)
-      .maybeSingle();
-    if (walletData?.mpc_wallet_id) {
-      mpcWalletId = walletData.mpc_wallet_id;
-    }
-  } catch {}
-
-  if (!mpcWalletId && req.mpc_wallet_id) {
-    mpcWalletId = req.mpc_wallet_id;
-  }
-
-  if (!mpcWalletId) {
-    throw new Error('SIGNER_NOT_BOUND: Wallet row has no mpc_wallet_id');
-  }
+  const stampObj: Stamp | undefined =
+    typeof stamp === 'string'
+      ? (stamp === 'autonomous' ? { delegateGrantId: undefined } : undefined)
+      : stamp;
 
   // Consume single-use permit. If missing or already used -> throws NO_SIGN_PERMIT!
-  // DO NOT insert permit here!
-  await assertSignPermit(mpcWalletId, req.payload_hash);
+  await assertSignPermit(requestId);
 
-  const provider = getMpcProvider();
-  const signed = await provider.signAndBroadcast({
-    mpcWalletId,
-    unsignedTx: req.canonical_tx as any,
-    payloadHash: req.payload_hash,
-    approvalEvidence: {
-      type: grantMode === 'autonomous' ? 'autonomous_grant' : 'passkey',
-      approvalId: req.id,
-    },
-  });
+  const row = await loadRequest(requestId);
+  if (!row) throw new Error('REQUEST_NOT_FOUND');
 
-  await updateRequest(req.id, {
-    status: 'pending_confirmation',
-    tx_hash: signed.txHash,
-  });
+  // If hosted and no user stamp or delegate grant, transition to pending_user_stamp
+  if (isHosted() && !stampObj?.stampedRequest && !stampObj?.delegateGrantId) {
+    await updateRequest(requestId, { status: 'pending_user_stamp' });
+    // Keep single-use permit active for the subsequent user stamp completion
+    await insertSignPermit(row.mpc_wallet_id || row.wallet_id, row.payload_hash, 10 * 60 * 1000, requestId);
+    return { status: 'pending_user_stamp', requestId };
+  }
 
-  // Advance to terminal success
-  const completed = await updateRequest(req.id, {
-    status: 'success',
-    tx_hash: signed.txHash,
-  });
+  if (stampObj?.stampedRequest) {
+    const { signedTransaction } = await getMpcProvider().submitStampedActivity({
+      activityId: stampObj.activityId || (row as any).turnkey_activity_id,
+      stampedRequest: stampObj.stampedRequest,
+    });
+    const chainId = row.canonical_tx?.chainId || 8453;
+    const { txHash } = await getMpcProvider().broadcastSignedTx(chainId, signedTransaction);
+    const updated = await updateRequest(requestId, { status: 'broadcast', tx_hash: txHash });
+    return { status: 'broadcast', txHash, requestId: updated.id };
+  }
 
-  return {
-    requestId: completed.id,
-    status: completed.status,
-    txHash: completed.tx_hash,
-  };
+  if (stampObj?.delegateGrantId) {
+    const delegateSecret = await loadDelegateSecret(stampObj.delegateGrantId);
+    if (!delegateSecret) {
+      throw new Error('AUTONOMOUS_REQUIRES_DELEGATE_KEY');
+    }
+    throw new Error('AUTONOMOUS_REQUIRES_DELEGATE_KEY');
+  }
+
+  if (allowOrgSign()) {
+    const mpcWalletId = row.mpc_wallet_id || row.wallet_id;
+    const signed = await getMpcProvider().signAndBroadcast({
+      mpcWalletId,
+      unsignedTx: row.canonical_tx as any,
+      payloadHash: row.payload_hash,
+      approvalEvidence: {
+        type: 'passkey',
+        approvalId: row.id,
+      },
+    });
+
+    await updateRequest(row.id, {
+      status: 'pending_confirmation',
+      tx_hash: signed.txHash,
+    });
+
+    const completed = await updateRequest(row.id, {
+      status: 'success',
+      tx_hash: signed.txHash,
+    });
+
+    return {
+      requestId: completed.id,
+      status: completed.status,
+      txHash: completed.tx_hash,
+    };
+  }
+
+  throw new Error('ORG_ROOT_SIGN_FORBIDDEN');
 }

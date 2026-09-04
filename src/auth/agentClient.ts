@@ -36,6 +36,9 @@ export async function verifyClientKey(raw: string, storedHash: string): Promise<
     const originalBuffer = Buffer.from(originalHex, 'hex');
     const derivedBuffer = (await scryptAsync(raw, salt, 64)) as Buffer;
 
+    if (originalBuffer.length !== derivedBuffer.length) {
+      return false;
+    }
     return timingSafeEqual(originalBuffer, derivedBuffer);
   } catch {
     return false;
