@@ -51,6 +51,7 @@ if (process.env.NODE_ENV === 'test' || process.env.TS_NODE_DEV || !process.env.V
 }
 
 export const app = express();
+app.set('trust proxy', 1);
 
 // Guard against custodial keys configured in cloud environment variables
 const activeForbiddenEnvs = ['PRIVATE_KEY', 'SEPOLIA_PRIVATE_KEY', 'ETH_PRIVATE_KEY'].filter(
@@ -1227,9 +1228,21 @@ app.patch('/wallet/grants/:id', requireSession, async (req: Request, res: Respon
 // -------------------------------------------------------------
 // Google OAuth Endpoints (Vite SPA Backend)
 // -------------------------------------------------------------
+function getGoogleCallbackUrl(req: Request): string {
+  if (process.env.GOOGLE_REDIRECT_URI) {
+    return process.env.GOOGLE_REDIRECT_URI;
+  }
+  const host = req.get('host') || 'mcp.northveil.xyz';
+  const isLocal = host.includes('localhost') || host.includes('127.0.0.1');
+  const proto = isLocal ? req.protocol : 'https';
+  return `${proto}://${host}/auth/google/callback`;
+}
+
 app.get('/auth/google/start', (req: Request, res: Response) => {
   const redirect = (req.query.redirect as string) || 'https://wallet.northveil.xyz/';
   const clientId = process.env.GOOGLE_CLIENT_ID;
+  const callbackUrl = getGoogleCallbackUrl(req);
+
   if (!clientId) {
     if (req.headers.accept && req.headers.accept.includes('text/html')) {
       try {
@@ -1241,12 +1254,11 @@ app.get('/auth/google/start', (req: Request, res: Response) => {
     return res.status(500).json({
       error: 'GOOGLE_CLIENT_ID_NOT_CONFIGURED',
       message: 'Google OAuth Client ID is not configured. Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to Vercel environment variables.',
-      authorizedRedirectUri: `${req.protocol}://${req.get('host')}/auth/google/callback`,
+      authorizedRedirectUri: callbackUrl,
     });
   }
 
   const state = Buffer.from(JSON.stringify({ redirect, nonce: crypto.randomBytes(16).toString('hex') })).toString('base64url');
-  const callbackUrl = `${req.protocol}://${req.get('host')}/auth/google/callback`;
   const scope = encodeURIComponent('openid email profile');
   const googleAuthUrl = `https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(callbackUrl)}&scope=${scope}&state=${state}&prompt=consent&access_type=offline`;
 
@@ -1270,7 +1282,7 @@ app.get('/auth/google/callback', async (req: Request, res: Response) => {
   }
 
   try {
-    const callbackUrl = `${req.protocol}://${req.get('host')}/auth/google/callback`;
+    const callbackUrl = getGoogleCallbackUrl(req);
     const userInfo = await exchangeGoogleCode(code, '', callbackUrl);
     const user = await upsertGoogleUser(userInfo);
 
