@@ -1,3 +1,19 @@
+<!--
+HAPPY-PATH END-TO-END FLOW:
+1. User visits wallet.northveil.xyz
+2. Click Continue with Google
+3. MCP redirects to accounts.google.com
+4. Google returns code to mcp.northveil.xyz/auth/google/callback
+5. MCP upserts public.users, signs nv_session cookie, sets user on session
+6. MCP redirects to wallet.northveil.xyz
+7. Wallet prompts passkey registration via MCP /auth/passkey/register/begin + finish
+8. MCP provisions Turnkey sub-org + MPC wallet, inserts public.wallets
+9. User opens Claude.ai -> Connectors, enters Name: Northveil, URL: https://mcp.northveil.xyz/sse
+10. Claude calls /.well-known/oauth-protected-resource, registers client, opens /oauth/authorize in popup
+11. User confirms in popup (cookie auth), MCP issues code -> token
+12. Claude calls nv_get_balances, stages transfers via nv_prepare_transfer; user approves with passkey on wallet app.
+-->
+
 # Northveil Non-Custodial Agent Wallet + MCP Implementation Specification
 
 Follow this specification strictly. Every MUST / MUST NOT is a hard constraint.

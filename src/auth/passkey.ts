@@ -1,3 +1,5 @@
+import { supabase } from '../supabase.js';
+
 let simpleWebAuthnPromise: Promise<typeof import('@simplewebauthn/server')> | null = null;
 
 async function getSimpleWebAuthn() {
@@ -15,6 +17,91 @@ export interface StoredAuthenticator {
   credentialPublicKey: Uint8Array;
   counter: number;
   transports?: string[];
+}
+
+// Challenge store with TTL (5 minutes)
+interface StoredChallenge {
+  challenge: string;
+  userId?: string;
+  expiresAt: number;
+}
+
+export const challengeStore = new Map<string, StoredChallenge>();
+
+export function pruneExpiredChallenges(): void {
+  const now = Date.now();
+  for (const [key, val] of challengeStore.entries()) {
+    if (val.expiresAt < now) {
+      challengeStore.delete(key);
+    }
+  }
+}
+
+/**
+ * Generates WebAuthn registration options for a user
+ */
+export async function generatePasskeyRegistrationOptions(opts: {
+  userId: string;
+  userName: string;
+  userDisplayName?: string;
+  rpID?: string;
+}) {
+  const { generateRegistrationOptions } = await getSimpleWebAuthn();
+  pruneExpiredChallenges();
+
+  const options = await generateRegistrationOptions({
+    rpName: 'Northveil',
+    rpID: opts.rpID || defaultRpID,
+    userID: Buffer.from(opts.userId, 'utf-8'),
+    userName: opts.userName,
+    userDisplayName: opts.userDisplayName || opts.userName,
+    attestationType: 'none',
+    authenticatorSelection: {
+      residentKey: 'preferred',
+      userVerification: 'required',
+    },
+  });
+
+  // Save challenge keyed by userId
+  challengeStore.set(`reg_${opts.userId}`, {
+    challenge: options.challenge,
+    userId: opts.userId,
+    expiresAt: Date.now() + 5 * 60 * 1000,
+  });
+
+  return options;
+}
+
+/**
+ * Generates WebAuthn authentication/login options
+ */
+export async function generatePasskeyLoginOptions(opts?: {
+  userId?: string;
+  rpID?: string;
+}) {
+  const { generateAuthenticationOptions } = await getSimpleWebAuthn();
+  pruneExpiredChallenges();
+
+  const options = await generateAuthenticationOptions({
+    rpID: opts?.rpID || defaultRpID,
+    userVerification: 'required',
+  });
+
+  const key = opts?.userId ? `auth_${opts.userId}` : `auth_challenge_${options.challenge}`;
+  challengeStore.set(key, {
+    challenge: options.challenge,
+    userId: opts?.userId,
+    expiresAt: Date.now() + 5 * 60 * 1000,
+  });
+
+  // Also index by raw challenge so finish can look it up even without userId upfront
+  challengeStore.set(`auth_raw_${options.challenge}`, {
+    challenge: options.challenge,
+    userId: opts?.userId,
+    expiresAt: Date.now() + 5 * 60 * 1000,
+  });
+
+  return options;
 }
 
 /**
@@ -55,15 +142,14 @@ export async function verifyPasskeyRegistration(opts: {
 }
 
 /**
- * Verifies WebAuthn passkey assertion cryptographically bound to transaction payload hash.
- * Challenge MUST commit to payloadHash (e.g. base64url(payloadHash)).
+ * Verifies WebAuthn passkey login/assertion response from navigator.credentials.get()
  */
-export async function verifyPasskeyForPayload(opts: {
+export async function verifyPasskeyLogin(opts: {
   response: any;
-  expectedChallenge: string; // base64url(payloadHash)
+  expectedChallenge: string;
+  storedAuthenticator: StoredAuthenticator;
   rpID?: string;
   origin?: string;
-  storedAuthenticator: StoredAuthenticator;
 }) {
   const { verifyAuthenticationResponse } = await getSimpleWebAuthn();
 
@@ -89,4 +175,75 @@ export async function verifyPasskeyForPayload(opts: {
     verified: true,
     newCounter: result.authenticationInfo.newCounter,
   };
+}
+
+/**
+ * Verifies WebAuthn passkey assertion cryptographically bound to transaction payload hash.
+ * Challenge MUST commit to payloadHash (e.g. base64url(payloadHash)).
+ */
+export async function verifyPasskeyForPayload(opts: {
+  response: any;
+  expectedChallenge: string; // base64url(payloadHash)
+  rpID?: string;
+  origin?: string;
+  storedAuthenticator: StoredAuthenticator;
+}) {
+  return verifyPasskeyLogin(opts);
+}
+
+/**
+ * Saves registered passkey credential to Supabase public.passkeys
+ */
+export async function savePasskeyRecord(opts: {
+  userId: string;
+  credentialId: string;
+  credentialPublicKey: Buffer;
+  counter: number;
+  transports?: string[];
+}): Promise<void> {
+  try {
+    await supabase.from('passkeys').insert({
+      user_id: opts.userId,
+      credential_id: opts.credentialId,
+      credential_public_key: opts.credentialPublicKey,
+      counter: opts.counter,
+      transports: opts.transports || [],
+      last_used_at: new Date().toISOString(),
+    });
+  } catch (err: any) {
+    console.warn('[Northveil] savePasskeyRecord db notice:', err?.message);
+  }
+}
+
+/**
+ * Retrieves stored passkey for credential ID
+ */
+export async function findPasskeyByCredentialId(credentialId: string): Promise<{
+  id: string;
+  user_id: string;
+  credential_id: string;
+  credential_public_key: Buffer;
+  counter: number;
+} | null> {
+  try {
+    const { data } = await supabase
+      .from('passkeys')
+      .select('*')
+      .eq('credential_id', credentialId)
+      .maybeSingle();
+
+    if (data) {
+      return {
+        id: data.id,
+        user_id: data.user_id,
+        credential_id: data.credential_id,
+        credential_public_key: Buffer.isBuffer(data.credential_public_key)
+          ? data.credential_public_key
+          : Buffer.from(data.credential_public_key),
+        counter: Number(data.counter || 0),
+      };
+    }
+  } catch {}
+
+  return null;
 }

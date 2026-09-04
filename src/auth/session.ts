@@ -2,7 +2,10 @@ import { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { supabase } from '../supabase.js';
 
-const SESSION_SECRET = process.env.SESSION_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY || 'northveil-session-secret-key-salt-9831';
+const SESSION_SECRET = process.env.SESSION_SECRET || (process.env.NODE_ENV !== 'production' ? 'northveil-dev-session-secret' : '');
+if (!SESSION_SECRET && process.env.NODE_ENV === 'production') {
+  throw new Error('SESSION_SECRET required');
+}
 
 export interface SessionPayload {
   userId: string;

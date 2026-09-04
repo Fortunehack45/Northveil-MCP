@@ -120,17 +120,20 @@ export function registerMockToken(
 }
 
 export async function findHash(tokens: any[] | null | undefined, bearer: string, keyField: string): Promise<any | null> {
-  // 1. Check in-memory test registry first
   const targetHash = hashToken(bearer);
-  for (const token of mockTokensRegistry.values()) {
-    if (token.tokenHash === targetHash || token.tokenHash === bearer) {
-      if (token.expiresAt > new Date()) {
-        return {
-          user_id: token.userId,
-          client_id: token.clientId,
-          token_hash: token.tokenHash,
-          status: token.status || 'active',
-        };
+
+  // 1. Check in-memory test registry only in non-production environments
+  if (process.env.NODE_ENV !== 'production') {
+    for (const token of mockTokensRegistry.values()) {
+      if (token.tokenHash === targetHash || token.tokenHash === bearer) {
+        if (token.expiresAt > new Date()) {
+          return {
+            user_id: token.userId,
+            client_id: token.clientId,
+            token_hash: token.tokenHash,
+            status: token.status || 'active',
+          };
+        }
       }
     }
   }
@@ -148,10 +151,12 @@ export async function findHash(tokens: any[] | null | undefined, bearer: string,
 }
 
 export async function findClientKey(clients: any[] | null | undefined, apiKey: string): Promise<any | null> {
-  // 1. Check in-memory test registry first
-  for (const client of mockClientsRegistry.values()) {
-    if (await verifyClientKey(apiKey, client.keyHash)) {
-      return client;
+  // 1. Check in-memory test registry only in non-production environments
+  if (process.env.NODE_ENV !== 'production') {
+    for (const client of mockClientsRegistry.values()) {
+      if (await verifyClientKey(apiKey, client.keyHash)) {
+        return client;
+      }
     }
   }
 
@@ -248,7 +253,7 @@ export async function resolveContext(
         if (data) clientRecord = data;
       } catch {}
 
-      if (!clientRecord) {
+      if (!clientRecord && process.env.NODE_ENV !== 'production') {
         clientRecord = mockClientsRegistry.get(match.client_id);
       }
 
@@ -295,12 +300,16 @@ export async function loadScope(userId: string, clientId: string | null): Promis
     if (data) walletRecord = data;
   } catch {}
 
-  if (!walletRecord) {
-    // Check mock wallets registry
-    for (const w of mockWalletsRegistry.values()) {
-      if (w.userId === userId && w.status === 'active') {
-        walletRecord = w;
-        break;
+  if (!walletRecord && process.env.NODE_ENV !== 'production') {
+    const direct = mockWalletsRegistry.get(userId);
+    if (direct) {
+      walletRecord = direct;
+    } else {
+      for (const w of mockWalletsRegistry.values()) {
+        if ((w.userId === userId || (w as any).user_id === userId) && (w.status === 'active' || !w.status)) {
+          walletRecord = w;
+          break;
+        }
       }
     }
   }
@@ -329,7 +338,7 @@ export async function loadScope(userId: string, clientId: string | null): Promis
       if (data) grantRecord = data;
     } catch {}
 
-    if (!grantRecord) {
+    if (!grantRecord && process.env.NODE_ENV !== 'production') {
       const mockGrant = mockGrantsRegistry.get(clientId);
       if (mockGrant) {
         grant = {

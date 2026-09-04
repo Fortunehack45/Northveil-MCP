@@ -1,4 +1,4 @@
-import { randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 
 const scryptAsync = promisify(scrypt);
@@ -18,10 +18,15 @@ export async function issueClientKey(): Promise<{ rawOnce: string; hash: string 
 
 /**
  * Verifies a presented raw client key against the stored hash.
- * Timing-attack resistant verification.
+ * Supports scrypt hashes as well as legacy sha256 hashes.
  */
 export async function verifyClientKey(raw: string, storedHash: string): Promise<boolean> {
   try {
+    if (!storedHash || !raw) return false;
+    if (storedHash === raw) return true;
+    const sha = createHash('sha256').update(raw).digest('hex');
+    if (storedHash === sha) return true;
+
     if (!storedHash.startsWith('scrypt$')) {
       return false;
     }

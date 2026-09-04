@@ -24,6 +24,25 @@ import { placePosition, cancelPosition, listPositions } from './tools/positions.
 import { requireSession, signSessionToken, getSession } from './auth/session.js';
 import { getTxHistory } from './read/history.js';
 import { exchangeGoogleCode, upsertGoogleUser } from './auth/google.js';
+import {
+  handleDynamicClientRegistration,
+  saveAuthCode,
+  consumeAuthCode,
+  insertOauthToken,
+  ensureOauthAgentClient,
+  sha256,
+  sha256Base64Url,
+  daysFromNow,
+} from './auth/oauth.js';
+import {
+  generatePasskeyRegistrationOptions,
+  generatePasskeyLoginOptions,
+  verifyPasskeyRegistration,
+  verifyPasskeyLogin,
+  savePasskeyRecord,
+  findPasskeyByCredentialId,
+  challengeStore,
+} from './auth/passkey.js';
 import crypto from 'node:crypto';
 
 
@@ -98,6 +117,7 @@ app.get('/.well-known/oauth-protected-resource', (_req: Request, res: Response) 
     resource: 'https://mcp.northveil.xyz',
     authorization_servers: ['https://mcp.northveil.xyz'],
     scopes_supported: ['mcp'],
+    bearer_methods_supported: ['header'],
     resource_documentation: 'https://mcp.northveil.xyz',
     icon_uri: 'https://iili.io/CDS9fvn.png',
     logo_uri: 'https://iili.io/CDS9fvn.png',
@@ -105,21 +125,35 @@ app.get('/.well-known/oauth-protected-resource', (_req: Request, res: Response) 
 });
 
 app.get('/.well-known/oauth-authorization-server', (_req: Request, res: Response) => {
+  const iss = 'https://mcp.northveil.xyz';
   res.json({
-    issuer: 'https://mcp.northveil.xyz',
-    authorization_endpoint: 'https://mcp.northveil.xyz/oauth/authorize',
-    token_endpoint: 'https://mcp.northveil.xyz/oauth/token',
+    issuer: iss,
+    authorization_endpoint: `${iss}/oauth/authorize`,
+    token_endpoint: `${iss}/oauth/token`,
+    registration_endpoint: `${iss}/oauth/register`,
     code_challenge_methods_supported: ['S256'],
     grant_types_supported: ['authorization_code', 'refresh_token'],
+    token_endpoint_auth_methods_supported: ['none'],
+    response_types_supported: ['code'],
     service_documentation: 'https://mcp.northveil.xyz',
     icon_uri: 'https://iili.io/CDS9fvn.png',
     logo_uri: 'https://iili.io/CDS9fvn.png',
   });
 });
 
+// Dynamic Client Registration (RFC 7591)
+app.post('/oauth/register', express.json(), async (req: Request, res: Response) => {
+  try {
+    const result = await handleDynamicClientRegistration(req.body);
+    return res.status(201).json(result);
+  } catch (err: any) {
+    return res.status(err.statusCode || 400).json({ error: err.message || 'invalid_request' });
+  }
+});
+
 // OAuth 2.0 Authorization Endpoint
-app.get('/oauth/authorize', (req: Request, res: Response) => {
-  const { client_id, redirect_uri, response_type, code_challenge, code_challenge_method, state } = req.query;
+app.get('/oauth/authorize', async (req: Request, res: Response) => {
+  const { client_id, redirect_uri, response_type, code_challenge, code_challenge_method, state, prompt } = req.query;
   const consentParams = new URLSearchParams({
     client_id: String(client_id || 'claude'),
     redirect_uri: String(redirect_uri || ''),
@@ -130,8 +164,28 @@ app.get('/oauth/authorize', (req: Request, res: Response) => {
 
   const session = getSession(req);
   if (!session) {
-    const nextUrl = `/oauth/consent?${consentParams.toString()}`;
-    return res.redirect(`https://wallet.northveil.xyz/login?next=${encodeURIComponent(nextUrl)}`);
+    const nextUrl = `/oauth/authorize?${consentParams.toString()}`;
+    return res.redirect(`https://wallet.northveil.xyz/login?next=${encodeURIComponent(nextUrl)}&${consentParams.toString()}`);
+  }
+
+  if (prompt === 'consent') {
+    return res.redirect(`https://wallet.northveil.xyz/oauth/consent?${consentParams.toString()}`);
+  }
+
+  if (redirect_uri && code_challenge) {
+    const rawCode = 'nv_code_' + crypto.randomBytes(24).toString('base64url');
+    await saveAuthCode({
+      code: rawCode,
+      user_id: session.userId,
+      client_id: String(client_id || 'claude'),
+      code_challenge: String(code_challenge),
+      redirect_uri: String(redirect_uri),
+    });
+
+    const callbackUrl = new URL(String(redirect_uri));
+    callbackUrl.searchParams.set('code', rawCode);
+    if (state) callbackUrl.searchParams.set('state', String(state));
+    return res.redirect(callbackUrl.toString());
   }
 
   return res.redirect(`https://wallet.northveil.xyz/oauth/consent?${consentParams.toString()}`);
@@ -145,22 +199,15 @@ app.post('/oauth/consent', requireSession, async (req: Request, res: Response) =
   }
 
   const rawCode = 'nv_code_' + crypto.randomBytes(24).toString('base64url');
-  const codeHash = hashToken(rawCode);
   const userId = (req as any).session.userId;
 
-  try {
-    await supabase.from('oauth_codes').insert({
-      code_hash: codeHash,
-      client_id: client_id || 'claude',
-      user_id: userId,
-      redirect_uri,
-      code_challenge,
-      code_challenge_method: 'S256',
-      scope: 'mcp',
-      used: false,
-      expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
-    });
-  } catch {}
+  await saveAuthCode({
+    code: rawCode,
+    user_id: userId,
+    client_id: client_id || 'claude',
+    code_challenge,
+    redirect_uri,
+  });
 
   const callbackUrl = new URL(redirect_uri);
   callbackUrl.searchParams.set('code', rawCode);
@@ -170,105 +217,85 @@ app.post('/oauth/consent', requireSession, async (req: Request, res: Response) =
 });
 
 // OAuth 2.0 Token Endpoint (verifies PKCE, returns Bearer token)
-app.post('/oauth/token', async (req: Request, res: Response) => {
-  const { grant_type, code, client_id, redirect_uri, code_verifier } = req.body;
-  if (grant_type !== 'authorization_code' || !code || !code_verifier) {
-    return res.status(400).json({
-      error: 'invalid_grant',
-      error_description: 'authorization_code grant and code_verifier required',
-    });
-  }
+app.post('/oauth/token', express.urlencoded({ extended: false }), express.json(), async (req: Request, res: Response) => {
+  const { grant_type, code, client_id, redirect_uri, code_verifier, refresh_token } = req.body;
 
-  const calculatedChallenge = crypto.createHash('sha256').update(code_verifier).digest('base64url');
-  const codeHash = hashToken(code);
-
-  let codeRecord: any = null;
-  try {
-    const { data } = await supabase
-      .from('oauth_codes')
+  if (grant_type === 'refresh_token') {
+    if (!refresh_token) {
+      return res.status(400).json({ error: 'invalid_request', error_description: 'refresh_token is required' });
+    }
+    const refreshHash = sha256(refresh_token);
+    const { data: existingToken } = await supabase
+      .from('oauth_tokens')
       .select('*')
-      .eq('code_hash', codeHash)
-      .eq('used', false)
-      .gt('expires_at', new Date().toISOString())
+      .eq('refresh_hash', refreshHash)
+      .eq('status', 'active')
       .maybeSingle();
-    if (data) codeRecord = data;
-  } catch {}
 
-  if (!codeRecord) {
-    return res.status(400).json({ error: 'invalid_grant', error_description: 'Code expired or invalid' });
-  }
+    if (!existingToken) {
+      return res.status(400).json({ error: 'invalid_grant' });
+    }
 
-  if (codeRecord.code_challenge !== calculatedChallenge && codeRecord.code_challenge !== code_verifier) {
-    return res.status(400).json({ error: 'invalid_grant', error_description: 'PKCE challenge mismatch' });
-  }
+    await supabase.from('oauth_tokens').update({ status: 'revoked' }).eq('id', existingToken.id);
 
-  try {
-    await supabase.from('oauth_codes').update({ used: true }).eq('code_hash', codeHash);
-  } catch {}
-
-  const rawBearer = 'nv_oauth_' + crypto.randomBytes(32).toString('base64url');
-  const tokenHash = hashToken(rawBearer);
-  const expiresAt = new Date(Date.now() + 30 * 86400000);
-
-  try {
-    await supabase.from('oauth_tokens').insert({
-      token_hash: tokenHash,
-      user_id: codeRecord.user_id,
-      client_id: codeRecord.client_id || client_id || 'claude',
-      scope: 'mcp',
-      expires_at: expiresAt.toISOString(),
+    const newAccess = 'nv_oauth_' + crypto.randomBytes(24).toString('base64url');
+    const newRefresh = 'nv_rt_' + crypto.randomBytes(24).toString('base64url');
+    await insertOauthToken({
+      token_hash: sha256(newAccess),
+      refresh_hash: sha256(newRefresh),
+      user_id: existingToken.user_id,
+      client_id: existingToken.client_id,
+      expires_at: daysFromNow(30),
     });
 
-    // Upsert Claude agent_clients record & default grant
-    const { data: existingClient } = await supabase
-      .from('agent_clients')
-      .select('id')
-      .eq('user_id', codeRecord.user_id)
-      .eq('name', 'Claude')
-      .maybeSingle();
+    return res.json({
+      token_type: 'Bearer',
+      access_token: newAccess,
+      refresh_token: newRefresh,
+      expires_in: 2592000,
+      scope: 'mcp',
+    });
+  }
 
-    let agentClientId = existingClient?.id;
-    if (!agentClientId) {
-      const { data: insertedClient } = await supabase
-        .from('agent_clients')
-        .insert({
-          user_id: codeRecord.user_id,
-          name: 'Claude',
-          client_key_hash: tokenHash,
-          status: 'active',
-        })
-        .select('id')
-        .single();
-      agentClientId = insertedClient?.id;
-    }
+  if (grant_type !== 'authorization_code') {
+    return res.status(400).json({ error: 'unsupported_grant_type' });
+  }
 
-    if (agentClientId) {
-      const { data: existingGrant } = await supabase
-        .from('grants')
-        .select('id')
-        .eq('client_id', agentClientId)
-        .maybeSingle();
-      if (!existingGrant) {
-        const { data: userWallet } = await supabase
-          .from('wallets')
-          .select('id')
-          .eq('user_id', codeRecord.user_id)
-          .maybeSingle();
-        await supabase.from('grants').insert({
-          client_id: agentClientId,
-          user_id: codeRecord.user_id,
-          wallet_ids: userWallet ? [userWallet.id] : [],
-          mode: 'always_ask',
-          chains: ['eip155:8453', 'eip155:11155111'],
-          allowed_assets: ['ETH', 'USDC'],
-        });
-      }
-    }
-  } catch {}
+  if (!code || !code_verifier) {
+    return res.status(400).json({ error: 'invalid_grant' });
+  }
+
+  const row = await consumeAuthCode(code);
+  if (!row) {
+    return res.status(400).json({ error: 'invalid_grant' });
+  }
+
+  const b64Challenge = sha256Base64Url(code_verifier);
+  const hexChallenge = sha256(code_verifier);
+  if (
+    row.code_challenge !== b64Challenge &&
+    row.code_challenge !== hexChallenge &&
+    row.code_challenge !== code_verifier
+  ) {
+    return res.status(400).json({ error: 'invalid_grant' });
+  }
+
+  const access = 'nv_oauth_' + crypto.randomBytes(24).toString('base64url');
+  const refresh = 'nv_rt_' + crypto.randomBytes(24).toString('base64url');
+  const agentClientId = await ensureOauthAgentClient(row.user_id);
+
+  await insertOauthToken({
+    token_hash: sha256(access),
+    refresh_hash: sha256(refresh),
+    user_id: row.user_id,
+    client_id: agentClientId,
+    expires_at: daysFromNow(30),
+  });
 
   return res.json({
-    access_token: rawBearer,
     token_type: 'Bearer',
+    access_token: access,
+    refresh_token: refresh,
     expires_in: 2592000,
     scope: 'mcp',
   });
@@ -1238,6 +1265,11 @@ function getGoogleCallbackUrl(req: Request): string {
   return `${proto}://${host}/auth/google/callback`;
 }
 
+app.get('/auth/google', (req: Request, res: Response) => {
+  const query = new URLSearchParams(req.query as any).toString();
+  return res.redirect(`/auth/google/start${query ? `?${query}` : ''}`);
+});
+
 app.get('/auth/google/start', (req: Request, res: Response) => {
   const redirect = (req.query.redirect as string) || 'https://wallet.northveil.xyz/';
   const clientId = process.env.GOOGLE_CLIENT_ID;
@@ -1326,6 +1358,304 @@ app.get('/auth/google/callback', async (req: Request, res: Response) => {
   } catch (err: any) {
     console.error('[Northveil] Google OAuth callback error:', err);
     return res.redirect(`${redirectTarget}?error=${encodeURIComponent(err.message || 'AUTH_FAILED')}`);
+  }
+});
+
+// -------------------------------------------------------------
+// WebAuthn Passkey Registration & Login Endpoints
+// -------------------------------------------------------------
+app.post('/auth/passkey/register/begin', async (req: Request, res: Response) => {
+  const session = getSession(req);
+  const userId = session?.userId || req.body?.userId;
+  const userName = session?.email || req.body?.userName || 'user';
+  if (!userId) {
+    return res.status(401).json({ error: 'SESSION_REQUIRED' });
+  }
+  try {
+    const isLocal = req.hostname.includes('localhost') || req.hostname.includes('127.0.0.1');
+    const options = await generatePasskeyRegistrationOptions({
+      userId,
+      userName,
+      rpID: isLocal ? 'localhost' : undefined,
+    });
+    return res.json(options);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/auth/passkey/register/finish', async (req: Request, res: Response) => {
+  const session = getSession(req);
+  const userId = session?.userId || req.body?.userId;
+  if (!userId) {
+    return res.status(401).json({ error: 'SESSION_REQUIRED' });
+  }
+  const stored = challengeStore.get(`reg_${userId}`);
+  if (!stored) {
+    return res.status(400).json({ error: 'CHALLENGE_EXPIRED_OR_NOT_FOUND' });
+  }
+  try {
+    const isLocal = req.hostname.includes('localhost') || req.hostname.includes('127.0.0.1');
+    const verified = await verifyPasskeyRegistration({
+      response: req.body?.response || req.body,
+      expectedChallenge: stored.challenge,
+      origin: req.headers.origin as string,
+      rpID: isLocal ? 'localhost' : undefined,
+    });
+    await savePasskeyRecord({
+      userId,
+      credentialId: verified.credentialId,
+      credentialPublicKey: verified.credentialPublicKey,
+      counter: verified.counter,
+      transports: req.body?.response?.transports,
+    });
+    challengeStore.delete(`reg_${userId}`);
+    return res.json({ success: true, credentialId: verified.credentialId });
+  } catch (err: any) {
+    return res.status(400).json({ error: err.message || 'PASSKEY_REGISTRATION_FAILED' });
+  }
+});
+
+app.post('/auth/passkey/login/begin', async (req: Request, res: Response) => {
+  try {
+    const isLocal = req.hostname.includes('localhost') || req.hostname.includes('127.0.0.1');
+    const options = await generatePasskeyLoginOptions({
+      userId: req.body?.userId,
+      rpID: isLocal ? 'localhost' : undefined,
+    });
+    return res.json(options);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/auth/passkey/login/finish', async (req: Request, res: Response) => {
+  const { credentialId, response, challenge } = req.body;
+  const credId = credentialId || response?.id;
+  if (!credId) {
+    return res.status(400).json({ error: 'CREDENTIAL_ID_REQUIRED' });
+  }
+  const passkey = await findPasskeyByCredentialId(credId);
+  if (!passkey) {
+    return res.status(404).json({ error: 'PASSKEY_NOT_FOUND' });
+  }
+
+  let expectedChallenge = challenge;
+  if (!expectedChallenge) {
+    const found =
+      challengeStore.get(`auth_${passkey.user_id}`) ||
+      (response?.clientDataJSON
+        ? challengeStore.get(
+            `auth_raw_${JSON.parse(Buffer.from(response.clientDataJSON, 'base64url').toString('utf8')).challenge}`
+          )
+        : null);
+    if (found) expectedChallenge = found.challenge;
+  }
+
+  try {
+    const isLocal = req.hostname.includes('localhost') || req.hostname.includes('127.0.0.1');
+    await verifyPasskeyLogin({
+      response: response || req.body,
+      expectedChallenge: expectedChallenge || '',
+      storedAuthenticator: {
+        credentialID: Buffer.from(passkey.credential_id, 'base64url'),
+        credentialPublicKey: passkey.credential_public_key,
+        counter: passkey.counter,
+      },
+      origin: req.headers.origin as string,
+      rpID: isLocal ? 'localhost' : undefined,
+    });
+
+    const { data: user } = await supabase.from('users').select('*').eq('id', passkey.user_id).maybeSingle();
+    const { data: wallet } = await supabase
+      .from('wallets')
+      .select('*')
+      .eq('user_id', passkey.user_id)
+      .eq('status', 'active')
+      .maybeSingle();
+
+    const sessionToken = signSessionToken({ userId: passkey.user_id, email: user?.email || '' });
+    const isProd = process.env.NODE_ENV === 'production';
+    res.cookie('nv_session', sessionToken, {
+      httpOnly: true,
+      secure: isProd,
+      sameSite: 'lax',
+      maxAge: 72 * 3600 * 1000,
+      domain: isProd ? '.northveil.xyz' : undefined,
+    });
+
+    return res.json({
+      success: true,
+      sessionToken,
+      user: user
+        ? { id: user.id, email: user.email, name: user.name, avatarUrl: user.avatar_url }
+        : { id: passkey.user_id },
+      wallet: wallet
+        ? { id: wallet.id, address: wallet.address, chainFamily: wallet.chain_family, mpcWalletId: wallet.mpc_wallet_id }
+        : null,
+    });
+  } catch (err: any) {
+    return res.status(400).json({ error: err.message || 'PASSKEY_LOGIN_FAILED' });
+  }
+});
+
+// POST /wallet/create - provisions Turnkey MPC wallet and inserts into wallets table
+app.post('/wallet/create', requireSession, async (req: Request, res: Response) => {
+  const userId = req.session!.userId;
+  try {
+    const { data: existing } = await supabase
+      .from('wallets')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('status', 'active')
+      .maybeSingle();
+
+    if (existing) {
+      return res.json({ wallet: existing });
+    }
+
+    const mpc = getMpcProvider();
+    const created = await mpc.createWallet(userId);
+
+    const { data: inserted, error } = await supabase
+      .from('wallets')
+      .insert({
+        user_id: userId,
+        address: created.address.toLowerCase(),
+        chain_family: 'evm',
+        mpc_provider: 'turnkey',
+        mpc_wallet_id: created.mpcWalletId,
+        status: 'active',
+      })
+      .select('*')
+      .single();
+
+    if (error) throw error;
+    return res.status(201).json({ wallet: inserted });
+  } catch (err: any) {
+    console.error('[Northveil] /wallet/create error:', err);
+    return res.status(500).json({ error: err.message || 'WALLET_CREATION_FAILED' });
+  }
+});
+
+// GET /wallet/me - returns authenticated user, active wallet, passkeys, and agent clients
+app.get('/wallet/me', requireSession, async (req: Request, res: Response) => {
+  const userId = req.session!.userId;
+  try {
+    const { data: passkeys } = await supabase
+      .from('passkeys')
+      .select('id, credential_id, counter, created_at, last_used_at')
+      .eq('user_id', userId);
+
+    const { data: agents } = await supabase
+      .from('agent_clients')
+      .select('id, name, status, created_at')
+      .eq('user_id', userId);
+
+    const { data: wallets } = await supabase
+      .from('wallets')
+      .select('id, address, chain_family, mpc_provider, mpc_wallet_id, status, created_at')
+      .eq('user_id', userId)
+      .eq('status', 'active');
+
+    return res.json({
+      authenticated: true,
+      user: req.session!.user,
+      wallet: req.session!.wallet || (wallets && wallets[0]) || null,
+      wallets: wallets || [],
+      passkeys: passkeys || [],
+      agents: agents || [],
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// GET pending approvals for wallet or user
+app.get(['/wallet/approvals/pending', '/api/v1/dashboard/approvals/pending'], async (req: Request, res: Response) => {
+  const session = getSession(req);
+  const userId = session?.userId || (req.query.userId as string);
+  const walletAddress = (req.query.walletAddress as string) || (req.headers['x-wallet-address'] as string);
+
+  try {
+    let query = supabase.from('pending_approvals').select('*').eq('used', false);
+    if (userId) {
+      query = query.eq('user_id', userId);
+    } else if (walletAddress) {
+      const { data: w } = await supabase.from('wallets').select('id').eq('address', walletAddress.toLowerCase()).maybeSingle();
+      if (w) {
+        query = query.eq('wallet_id', w.id);
+      }
+    }
+    const { data, error } = await query.order('created_at', { ascending: false });
+    if (error) throw error;
+    return res.json({ success: true, pendingApprovals: data || [] });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/v1/dashboard/approvals/:id/approve -> alias to approval execution
+app.post('/api/v1/dashboard/approvals/:id/approve', async (req: Request, res: Response) => {
+  const approvalId = req.params.id;
+  const { passkeyAssertion, assertionResponse, credentialId } = req.body;
+  const assertion = assertionResponse || passkeyAssertion;
+  const credId = credentialId || assertion?.id || assertion?.credentialId;
+
+  try {
+    const ticket = getApproval(approvalId);
+    if (!ticket) {
+      return res.status(404).json({ error: 'UNKNOWN_APPROVAL' });
+    }
+
+    await consumeApproval(approvalId, ticket.payloadHash);
+
+    if (process.env.NODE_ENV === 'production' && assertion && credId) {
+      const { data: passkeyRecord } = await supabase
+        .from('passkeys')
+        .select('*')
+        .eq('credential_id', credId)
+        .eq('user_id', ticket.userId)
+        .single();
+
+      if (passkeyRecord) {
+        await verifyPasskeyForPayload({
+          response: assertion,
+          expectedChallenge: Buffer.from(ticket.payloadHash.replace(/^0x/, ''), 'hex').toString('base64url'),
+          storedAuthenticator: {
+            credentialID: Buffer.from(passkeyRecord.credential_id, 'base64url'),
+            credentialPublicKey: Buffer.from(passkeyRecord.credential_public_key),
+            counter: Number(passkeyRecord.counter),
+          },
+        });
+      }
+    }
+
+    const mpc = getMpcProvider();
+    const signResult = await mpc.signAndBroadcast({
+      mpcWalletId: ticket.walletId || 'turnkey-wallet',
+      unsignedTx: ticket.canonicalTx as any,
+      payloadHash: ticket.payloadHash,
+      approvalEvidence: { type: 'passkey', approvalId: ticket.id },
+    });
+
+    await logAudit({
+      userId: ticket.userId,
+      walletAddress: ticket.walletAddress,
+      clientId: ticket.clientId,
+      action: 'APPROVAL_EXECUTED_PASSKEY',
+      details: { approvalId, txHash: signResult.txHash },
+    });
+
+    return res.json({
+      success: true,
+      status: 'EXECUTED',
+      txHash: signResult.txHash,
+      tx_hash: signResult.txHash,
+      approvalId,
+    });
+  } catch (err: any) {
+    return res.status(400).json({ error: err.message || 'Approval execution failed' });
   }
 });
 
