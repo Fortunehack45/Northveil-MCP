@@ -45,11 +45,8 @@ let activeClient: SupabaseClient = primaryClient;
 
 // Asynchronous boot validation
 if (fallbackClient !== primaryClient) {
-  primaryClient
-    .from('users')
-    .select('id')
-    .limit(1)
-    .then(({ error }) => {
+  Promise.resolve(primaryClient.from('users').select('id').limit(1))
+    .then(({ error }: any) => {
       if (error && (error.message?.includes('Invalid API key') || error.message?.includes('JWT') || error.code === 'PGRST301')) {
         console.warn(
           `[Northveil Supabase] Primary client boot test rejected (${error.message}). Failing over to verified default anon key.`
