@@ -35,18 +35,24 @@ export async function exchangeGoogleCode(
     throw new Error('Google OAuth credentials not configured in environment');
   }
 
+  const tokenParams: Record<string, string> = {
+    code,
+    client_id: clientId,
+    client_secret: clientSecret,
+    redirect_uri: redirectUri,
+    grant_type: 'authorization_code',
+  };
+
+  if (codeVerifier && codeVerifier.trim().length > 0) {
+    tokenParams.code_verifier = codeVerifier.trim();
+  }
+
   const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      code,
-      client_id: clientId,
-      client_secret: clientSecret,
-      redirect_uri: redirectUri,
-      grant_type: 'authorization_code',
-      code_verifier: codeVerifier,
-    }),
+    body: new URLSearchParams(tokenParams),
   });
+
 
   if (!tokenRes.ok) {
     const errorBody = await tokenRes.text();

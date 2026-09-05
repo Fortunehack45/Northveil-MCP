@@ -1270,13 +1270,16 @@ export function walletRedirect(origin: string, q: Record<string, string>): strin
   return u.toString();
 }
 
-function getGoogleCallbackUrl(req: Request): string {
+export function getGoogleCallbackUrl(req?: Request): string {
   if (process.env.GOOGLE_REDIRECT_URI) {
     return process.env.GOOGLE_REDIRECT_URI;
   }
-  const host = req.get('host') || 'mcp.northveil.xyz';
+  if (isHosted()) {
+    return 'https://mcp.northveil.xyz/auth/google/callback';
+  }
+  const host = req?.get('host') || 'localhost:3001';
   const isLocal = host.includes('localhost') || host.includes('127.0.0.1');
-  const proto = isLocal ? req.protocol : 'https';
+  const proto = isLocal ? (req?.protocol || 'http') : 'https';
   return `${proto}://${host}/auth/google/callback`;
 }
 
@@ -1342,12 +1345,22 @@ app.get('/auth/google/callback', async (req: Request, res: Response) => {
   } catch (err: any) {
     console.error('[Northveil] Google OAuth callback error:', err);
     const msg = String(err?.message || err || '');
-    if (/invalid api key/i.test(msg) || /SUPABASE_ADMIN_KEY_INVALID/i.test(msg)) {
+    const errCode = err?.code || '';
+    if (
+      /invalid api key/i.test(msg) ||
+      /SUPABASE_ADMIN_KEY_INVALID/i.test(msg) ||
+      errCode === 'AUTH_DB_MISCONFIGURED' ||
+      msg.includes('AUTH_DB_MISCONFIGURED')
+    ) {
       return res.redirect(walletRedirect(redirectTarget, { error: 'AUTH_DB_MISCONFIGURED' }));
+    }
+    if (msg.includes('Google OAuth credentials not configured')) {
+      return res.redirect(walletRedirect(redirectTarget, { error: 'GOOGLE_CLIENT_ID_NOT_CONFIGURED' }));
     }
     return res.redirect(walletRedirect(redirectTarget, { error: 'AUTH_FAILED' }));
   }
 });
+
 
 // -------------------------------------------------------------
 // Email OTP Endpoints (5-minute TTL, Rate-Limited, Single-Use)

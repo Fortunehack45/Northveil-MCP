@@ -14,16 +14,10 @@ export function isHosted(): boolean {
 export function getSupabaseKey(): string {
   const service = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
   const anon = process.env.SUPABASE_ANON_KEY?.trim();
-  if (isHosted()) {
-    if (!process.env.SUPABASE_URL?.startsWith('https://')) {
-      throw new Error('SUPABASE_URL_MISSING');
-    }
-    if (!service || service.length < 40) {
-      throw new Error('SUPABASE_ADMIN_KEY_INVALID');
-    }
+  if (service && service.length >= 40 && !service.includes('placeholder') && service !== 'invalid_key') {
     return service;
   }
-  return service || anon || DEFAULT_SUPABASE_ANON_KEY;
+  return anon || DEFAULT_SUPABASE_ANON_KEY;
 }
 
 export function classifyDbError(err: any): { code: string; status: number } {
@@ -35,14 +29,8 @@ export function classifyDbError(err: any): { code: string; status: number } {
 }
 
 export const supabaseUrl = process.env.SUPABASE_URL || DEFAULT_SUPABASE_URL;
+export const supabaseKey = getSupabaseKey();
 
-let resolvedKey = DEFAULT_SUPABASE_ANON_KEY;
-try {
-  resolvedKey = getSupabaseKey();
-} catch {
-  resolvedKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() || 'invalid_key';
-}
-export const supabaseKey = resolvedKey;
 
 export const isSupabaseConfigured = true;
 
