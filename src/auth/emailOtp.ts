@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
-import { supabase } from '../supabase.js';
+import { supabase, isHosted } from '../supabase.js';
 import { signSessionToken } from './session.js';
+
 import { HttpError } from './resolveContext.js';
 
 export const OTP_TTL_MS = 5 * 60 * 1000; // 5 minutes
@@ -102,9 +103,14 @@ export async function sendEmailCode(email: string, code: string): Promise<boolea
   const from = process.env.EMAIL_FROM || 'Northveil <auth@northveil.xyz>';
 
   if (!apiKey) {
-    console.info(`[Northveil Email OTP] No RESEND_API_KEY configured. Code for ${email}: ${code}`);
+    if (!isHosted()) {
+      console.info(`[Northveil Email OTP] No RESEND_API_KEY configured. Code for ${email}: ${code}`);
+    } else {
+      console.warn(`[Northveil Email OTP] No RESEND_API_KEY configured on hosted environment for ${email}.`);
+    }
     return false;
   }
+
 
   try {
     const res = await fetch('https://api.resend.com/emails', {

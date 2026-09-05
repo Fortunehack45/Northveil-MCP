@@ -257,13 +257,18 @@ app.get('/oauth/authorize', async (req: Request, res: Response) => {
 
   if (redirect_uri && code_challenge) {
     const rawCode = 'nv_code_' + crypto.randomBytes(24).toString('base64url');
-    await saveAuthCode({
-      code: rawCode,
-      user_id: session.userId,
-      client_id: String(client_id || 'claude'),
-      code_challenge: String(code_challenge),
-      redirect_uri: String(redirect_uri),
-    });
+    try {
+      await saveAuthCode({
+        code: rawCode,
+        user_id: session.userId,
+        client_id: String(client_id || 'claude'),
+        code_challenge: String(code_challenge),
+        redirect_uri: String(redirect_uri),
+      });
+    } catch (saveErr: any) {
+      console.error('[OAuth] saveAuthCode failed in /oauth/authorize:', saveErr?.message);
+      return res.status(503).json({ error: 'temporarily_unavailable', error_description: 'Failed to persist authorization code' });
+    }
 
     const callbackUrl = new URL(String(redirect_uri));
     callbackUrl.searchParams.set('code', rawCode);
@@ -284,13 +289,18 @@ app.post('/oauth/consent', requireSession, async (req: Request, res: Response) =
   const rawCode = 'nv_code_' + crypto.randomBytes(24).toString('base64url');
   const userId = (req as any).session.userId;
 
-  await saveAuthCode({
-    code: rawCode,
-    user_id: userId,
-    client_id: client_id || 'claude',
-    code_challenge,
-    redirect_uri,
-  });
+  try {
+    await saveAuthCode({
+      code: rawCode,
+      user_id: userId,
+      client_id: client_id || 'claude',
+      code_challenge,
+      redirect_uri,
+    });
+  } catch (saveErr: any) {
+    console.error('[OAuth] saveAuthCode failed in /oauth/consent:', saveErr?.message);
+    return res.status(503).json({ error: 'temporarily_unavailable', error_description: 'Failed to persist authorization code' });
+  }
 
   const callbackUrl = new URL(redirect_uri);
   callbackUrl.searchParams.set('code', rawCode);
@@ -301,88 +311,112 @@ app.post('/oauth/consent', requireSession, async (req: Request, res: Response) =
 
 // OAuth 2.0 Token Endpoint (verifies PKCE, returns Bearer token)
 app.post('/oauth/token', express.urlencoded({ extended: false }), express.json(), async (req: Request, res: Response) => {
-  const { grant_type, code, client_id, redirect_uri, code_verifier, refresh_token } = req.body;
+  try {
+    const { grant_type, code, client_id, redirect_uri, code_verifier, refresh_token } = req.body;
 
-  if (grant_type === 'refresh_token') {
-    if (!refresh_token) {
-      return res.status(400).json({ error: 'invalid_request', error_description: 'refresh_token is required' });
+    if (grant_type === 'refresh_token') {
+      if (!refresh_token) {
+        return res.status(400).json({ error: 'invalid_request', error_description: 'refresh_token is required' });
+      }
+      const refreshHash = sha256(refresh_token);
+      const { data: existingToken, error: tokErr } = await supabase
+        .from('oauth_tokens')
+        .select('*')
+        .eq('refresh_hash', refreshHash)
+        .eq('status', 'active')
+        .maybeSingle();
+
+      if (tokErr) {
+        const msg = tokErr.message || '';
+        if (/invalid api key/i.test(msg) || /SUPABASE_ADMIN_KEY_INVALID/i.test(msg)) {
+          console.error(`[OAuth] oauth_token_fail code=AUTH_DB_MISCONFIGURED message=${msg.slice(0, 200)}`);
+          return res.status(503).json({ error: 'temporarily_unavailable', error_description: 'Database unavailable' });
+        }
+        throw tokErr;
+      }
+
+      if (!existingToken) {
+        return res.status(400).json({ error: 'invalid_grant' });
+      }
+
+      await supabase.from('oauth_tokens').update({ status: 'revoked' }).eq('id', existingToken.id);
+
+      const newAccess = 'nv_oauth_' + crypto.randomBytes(24).toString('base64url');
+      const newRefresh = 'nv_rt_' + crypto.randomBytes(24).toString('base64url');
+      await insertOauthToken({
+        token_hash: sha256(newAccess),
+        refresh_hash: sha256(newRefresh),
+        user_id: existingToken.user_id,
+        client_id: existingToken.client_id,
+        expires_at: daysFromNow(30),
+      });
+
+      return res.json({
+        token_type: 'Bearer',
+        access_token: newAccess,
+        refresh_token: newRefresh,
+        expires_in: 2592000,
+        scope: 'mcp',
+      });
     }
-    const refreshHash = sha256(refresh_token);
-    const { data: existingToken } = await supabase
-      .from('oauth_tokens')
-      .select('*')
-      .eq('refresh_hash', refreshHash)
-      .eq('status', 'active')
-      .maybeSingle();
 
-    if (!existingToken) {
+    if (grant_type !== 'authorization_code') {
+      return res.status(400).json({ error: 'unsupported_grant_type' });
+    }
+
+    if (!code || !code_verifier) {
       return res.status(400).json({ error: 'invalid_grant' });
     }
 
-    await supabase.from('oauth_tokens').update({ status: 'revoked' }).eq('id', existingToken.id);
+    const row = await consumeAuthCode(code);
+    if (!row) {
+      return res.status(400).json({ error: 'invalid_grant' });
+    }
 
-    const newAccess = 'nv_oauth_' + crypto.randomBytes(24).toString('base64url');
-    const newRefresh = 'nv_rt_' + crypto.randomBytes(24).toString('base64url');
+    const b64Challenge = sha256Base64Url(code_verifier);
+    const hexChallenge = sha256(code_verifier);
+    if (
+      row.code_challenge !== b64Challenge &&
+      row.code_challenge !== hexChallenge &&
+      row.code_challenge !== code_verifier
+    ) {
+      return res.status(400).json({ error: 'invalid_grant' });
+    }
+
+    const access = 'nv_oauth_' + crypto.randomBytes(24).toString('base64url');
+    const refresh = 'nv_rt_' + crypto.randomBytes(24).toString('base64url');
+    const agentClientId = await ensureOauthAgentClient(row.user_id);
+
     await insertOauthToken({
-      token_hash: sha256(newAccess),
-      refresh_hash: sha256(newRefresh),
-      user_id: existingToken.user_id,
-      client_id: existingToken.client_id,
+      token_hash: sha256(access),
+      refresh_hash: sha256(refresh),
+      user_id: row.user_id,
+      client_id: agentClientId,
       expires_at: daysFromNow(30),
     });
 
     return res.json({
       token_type: 'Bearer',
-      access_token: newAccess,
-      refresh_token: newRefresh,
+      access_token: access,
+      refresh_token: refresh,
       expires_in: 2592000,
       scope: 'mcp',
     });
+  } catch (err: any) {
+    const msg = String(err?.message || err || '');
+    if (/persistence|invalid api key|AUTH_DB_MISCONFIGURED|SUPABASE_ADMIN_KEY_INVALID/i.test(msg)) {
+      console.error(`[OAuth] oauth_token_fail code=temporarily_unavailable message=${msg.slice(0, 200)}`);
+      return res.status(503).json({ error: 'temporarily_unavailable', error_description: 'Token persistence or database error' });
+    }
+    if (/invalid_grant|code_challenge|code_verifier|PKCE/i.test(msg)) {
+      console.error(`[OAuth] oauth_token_fail code=invalid_grant message=${msg.slice(0, 200)}`);
+      return res.status(400).json({ error: 'invalid_grant' });
+    }
+    console.error(`[OAuth] oauth_token_fail code=server_error message=${msg.slice(0, 200)}`);
+    return res.status(500).json({ error: 'server_error', error_description: 'Internal server error' });
   }
-
-  if (grant_type !== 'authorization_code') {
-    return res.status(400).json({ error: 'unsupported_grant_type' });
-  }
-
-  if (!code || !code_verifier) {
-    return res.status(400).json({ error: 'invalid_grant' });
-  }
-
-  const row = await consumeAuthCode(code);
-  if (!row) {
-    return res.status(400).json({ error: 'invalid_grant' });
-  }
-
-  const b64Challenge = sha256Base64Url(code_verifier);
-  const hexChallenge = sha256(code_verifier);
-  if (
-    row.code_challenge !== b64Challenge &&
-    row.code_challenge !== hexChallenge &&
-    row.code_challenge !== code_verifier
-  ) {
-    return res.status(400).json({ error: 'invalid_grant' });
-  }
-
-  const access = 'nv_oauth_' + crypto.randomBytes(24).toString('base64url');
-  const refresh = 'nv_rt_' + crypto.randomBytes(24).toString('base64url');
-  const agentClientId = await ensureOauthAgentClient(row.user_id);
-
-  await insertOauthToken({
-    token_hash: sha256(access),
-    refresh_hash: sha256(refresh),
-    user_id: row.user_id,
-    client_id: agentClientId,
-    expires_at: daysFromNow(30),
-  });
-
-  return res.json({
-    token_type: 'Bearer',
-    access_token: access,
-    refresh_token: refresh,
-    expires_in: 2592000,
-    scope: 'mcp',
-  });
 });
+
 
 // Rate limit: 100 requests per 15 minutes per IP
 const apiLimiter = rateLimit({
@@ -586,25 +620,23 @@ app.get('/health', (req: Request, res: Response) => {
 app.get('/health/deps', async (_req: Request, res: Response) => {
   try {
     const { error } = await supabase.from('email_otp').select('id').limit(1);
-    if (!error) {
-      return res.json({ supabase: 'ok' });
-    }
-    const msg = error.message || '';
-    if (/invalid api key/i.test(msg) || /SUPABASE_ADMIN_KEY_INVALID/i.test(msg)) {
+    if (error && /invalid api key/i.test(error.message)) {
       return res.status(503).json({ supabase: 'invalid_api_key' });
     }
-    if (/permission denied|row-level security|rls/i.test(msg)) {
-      return res.status(503).json({ supabase: 'rls' });
+    if (error) {
+      return res.status(503).json({ supabase: 'error', detail: error.message.slice(0, 80) });
     }
-    return res.status(503).json({ supabase: 'down' });
-  } catch (err: any) {
-    const msg = String(err?.message || err);
-    if (/invalid api key/i.test(msg) || /SUPABASE_ADMIN_KEY_INVALID/i.test(msg)) {
-      return res.status(503).json({ supabase: 'invalid_api_key' });
-    }
-    return res.status(503).json({ supabase: 'down' });
+    return res.json({
+      supabase: 'ok',
+      resend: process.env.RESEND_API_KEY ? 'configured' : 'missing',
+      google: process.env.GOOGLE_CLIENT_ID ? 'configured' : 'missing',
+      turnkey: process.env.TURNKEY_ORGANIZATION_ID ? 'configured' : 'missing',
+    });
+  } catch (e: any) {
+    return res.status(503).json({ supabase: 'error', detail: String(e?.message || e).slice(0, 80) });
   }
 });
+
 
 
 // -------------------------------------------------------------
@@ -1269,12 +1301,27 @@ app.patch('/wallet/grants/:id', requireSession, async (req: Request, res: Respon
 
 // -------------------------------------------------------------
 // Google OAuth Endpoints (Vite SPA Backend)
-// -------------------------------------------------------------
-export function walletRedirect(origin: string, q: Record<string, string>): string {
-  const u = new URL('/', origin);
+export function walletRedirect(target: string, q: Record<string, string>): string {
+  const base = target.startsWith('http')
+    ? target
+    : `https://wallet.northveil.xyz${target.startsWith('/') ? target : `/${target}`}`;
+  const u = new URL(base);
   for (const [k, v] of Object.entries(q)) u.searchParams.set(k, v);
   return u.toString();
 }
+
+export function classifyAuthRedirect(err: unknown): string {
+  const m = String((err as any)?.message || err || '');
+  if (/invalid api key|AUTH_DB_MISCONFIGURED|SUPABASE_ADMIN_KEY_INVALID/i.test(m)) {
+    return 'AUTH_DB_MISCONFIGURED';
+  }
+  if (/Google token exchange|UNVERIFIED_EMAIL|Google OAuth credentials/i.test(m)) {
+    return 'GOOGLE_AUTH_FAILED';
+  }
+  if (/session|cookie/i.test(m)) return 'SESSION_FAILED';
+  return 'AUTH_FAILED';
+}
+
 
 export function getGoogleCallbackUrl(req?: Request): string {
   if (process.env.GOOGLE_REDIRECT_URI) {
@@ -1349,22 +1396,12 @@ app.get('/auth/google/callback', async (req: Request, res: Response) => {
 
     return res.redirect(walletRedirect(redirectTarget, { sessionToken }));
   } catch (err: any) {
-    console.error('[Northveil] Google OAuth callback error:', err);
-    const msg = String(err?.message || err || '');
-    const errCode = err?.code || '';
-    if (
-      /invalid api key/i.test(msg) ||
-      /SUPABASE_ADMIN_KEY_INVALID/i.test(msg) ||
-      errCode === 'AUTH_DB_MISCONFIGURED' ||
-      msg.includes('AUTH_DB_MISCONFIGURED')
-    ) {
-      return res.redirect(walletRedirect(redirectTarget, { error: 'AUTH_DB_MISCONFIGURED' }));
-    }
-    if (msg.includes('Google OAuth credentials not configured')) {
-      return res.redirect(walletRedirect(redirectTarget, { error: 'GOOGLE_CLIENT_ID_NOT_CONFIGURED' }));
-    }
-    return res.redirect(walletRedirect(redirectTarget, { error: 'AUTH_FAILED' }));
+    const classified = classifyAuthRedirect(err);
+    const msg = String(err?.message || err || '').slice(0, 200);
+    console.error(`[Northveil] google_callback_fail code=${classified} message=${msg}`);
+    return res.redirect(walletRedirect(redirectTarget, { error: classified }));
   }
+
 });
 
 

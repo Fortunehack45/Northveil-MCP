@@ -330,86 +330,12 @@ export function turnkeyProvider(): MpcProvider {
       throw new Error("RAW_MATERIAL_FORBIDDEN");
     },
 
-    async signAndBroadcast(req: SignRequest): Promise<SignResult> {
-      // 1. Re-hash unsignedTx and compare with payloadHash
-      const recomputedHash = canonicalPayloadHash({
-        chain: `eip155:${req.unsignedTx.chainId}`,
-        to: req.unsignedTx.to,
-        valueWei: req.unsignedTx.value,
-        data: req.unsignedTx.data || '0x',
-        nonce: req.unsignedTx.nonce,
-      });
-
-      if (recomputedHash !== req.payloadHash) {
-        throw new Error('PAYLOAD_TAMPERING_DETECTED: Recomputed payload hash does not match approved hash.');
-      }
-
-      if (!allowOrgSign()) {
-        throw new Error('ORG_ROOT_SIGN_FORBIDDEN: hosted signing must use stampSignActivity + broadcastSignedTx');
-      }
-
-      const { TurnkeyClient } = await import('@turnkey/http');
-      const { ApiKeyStamper } = await import('@turnkey/api-key-stamper');
-
-      const stamper = new ApiKeyStamper({
-        apiPublicKey: process.env.TURNKEY_API_PUBLIC_KEY!,
-        apiPrivateKey: process.env.TURNKEY_API_PRIVATE_KEY!,
-      });
-
-      const client = new TurnkeyClient(
-        { baseUrl: process.env.TURNKEY_BASE_URL || 'https://api.turnkey.com' },
-        stamper
+    async signAndBroadcast(_req: SignRequest): Promise<SignResult> {
+      throw new Error(
+        'ORG_ROOT_SIGN_FORBIDDEN: hosted signing must use createSignActivity + submitStampedActivity + broadcastSignedTx'
       );
-
-      const organizationId = process.env.TURNKEY_ORGANIZATION_ID!;
-      
-      // Serialize unsigned transaction to EIP-1559 RLP format
-      const tx = ethers.Transaction.from({
-        to: req.unsignedTx.to,
-        value: BigInt(req.unsignedTx.value),
-        data: req.unsignedTx.data || '0x',
-        chainId: req.unsignedTx.chainId,
-        nonce: req.unsignedTx.nonce,
-        gasLimit: req.unsignedTx.gasLimit ? BigInt(req.unsignedTx.gasLimit) : 21000n,
-        maxFeePerGas: req.unsignedTx.maxFeePerGas ? BigInt(req.unsignedTx.maxFeePerGas) : 1000000000n,
-        maxPriorityFeePerGas: req.unsignedTx.maxPriorityFeePerGas ? BigInt(req.unsignedTx.maxPriorityFeePerGas) : 1000000000n,
-        type: 2,
-      });
-
-      const unsignedSerialized = tx.unsignedSerialized;
-
-      // 2. Turnkey threshold sign in secure enclave
-      const signActivity = await client.signTransaction({
-        type: 'ACTIVITY_TYPE_SIGN_TRANSACTION_V2' as any,
-        organizationId,
-        parameters: {
-          signWith: req.mpcWalletId,
-          type: 'TRANSACTION_TYPE_ETHEREUM',
-          unsignedTransaction: unsignedSerialized,
-        } as any,
-        timestampMs: String(Date.now()),
-      });
-
-      const pollSign = await client.getActivity({
-        organizationId,
-        activityId: signActivity.activity.id,
-      });
-
-      const signedTx = (pollSign.activity.result as any)?.signTransactionResult?.signedTransaction;
-      if (!signedTx) {
-        throw new Error('Turnkey failed to sign transaction');
-      }
-
-      // 3. Broadcast to public RPC
-      const rpcUrl = getRpcForChain(req.unsignedTx.chainId);
-      const provider = new ethers.JsonRpcProvider(rpcUrl);
-      const broadcastResponse = await provider.broadcastTransaction(signedTx);
-
-      return {
-        txHash: broadcastResponse.hash,
-        rawTransaction: signedTx,
-      };
     },
+
 
     async createSignActivity(req: SignRequest): Promise<{
       activityId: string;

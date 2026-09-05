@@ -40,6 +40,18 @@ const fallbackClient = createClient(supabaseUrl, DEFAULT_SUPABASE_ANON_KEY, {
   auth: { persistSession: false, autoRefreshToken: false },
 });
 
+function logKeyMetadata(key: string) {
+  try {
+    const parts = key.split('.');
+    if (parts.length === 3) {
+      const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
+      console.info(`[Northveil Supabase] Key role: ${payload.role || 'unknown'}, ref: ${payload.ref || 'unknown'}`);
+    }
+  } catch {}
+}
+
+logKeyMetadata(supabaseKey);
+
 let currentClient: SupabaseClient = primaryClient;
 let hasCheckedKey = false;
 
@@ -50,16 +62,23 @@ export async function checkAndEnsureWorkingKey(): Promise<void> {
   try {
     const probe = await primaryClient.from('email_otp').select('id').limit(1);
     if (probe.error && /invalid api key/i.test(probe.error.message)) {
-      console.warn('[Northveil Supabase] Configured key invalid on hosted. Auto-switching to verified database key.');
+      if (isHosted()) {
+        console.error('[Northveil Supabase] Configured SUPABASE_SERVICE_ROLE_KEY invalid on hosted. Refusing to fake admin via anon key.');
+        return;
+      }
+      console.warn('[Northveil Supabase] Configured key invalid in dev/test. Auto-switching to verified database key.');
       currentClient = fallbackClient;
     }
   } catch {
-    currentClient = fallbackClient;
+    if (!isHosted()) {
+      currentClient = fallbackClient;
+    }
   }
 }
 
 // Start async check immediately on module load
 checkAndEnsureWorkingKey().catch(() => {});
+
 
 export const supabase: SupabaseClient = new Proxy({} as SupabaseClient, {
   get(_t, prop) {
