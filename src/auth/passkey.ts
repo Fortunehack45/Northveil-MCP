@@ -254,15 +254,27 @@ export async function verifyPasskeyLogin(opts: {
   const effectiveRpId = getRpId(opts.hostname || opts.rpID);
   const origins = allowedOrigins();
 
+  const credIDStr =
+    typeof opts.storedAuthenticator.credentialID === 'string'
+      ? opts.storedAuthenticator.credentialID
+      : Buffer.from(opts.storedAuthenticator.credentialID).toString('base64url');
+  const pubKeyBytes = new Uint8Array(opts.storedAuthenticator.credentialPublicKey);
+  const counterVal = Number(opts.storedAuthenticator.counter || 0);
+
   const verifyOpts = {
     response: opts.response,
     expectedChallenge: opts.expectedChallenge,
     expectedOrigin: origins,
     expectedRPID: effectiveRpId,
+    credential: {
+      id: credIDStr,
+      publicKey: pubKeyBytes,
+      counter: counterVal,
+    },
     authenticator: {
       credentialID: opts.storedAuthenticator.credentialID,
       credentialPublicKey: opts.storedAuthenticator.credentialPublicKey,
-      counter: opts.storedAuthenticator.counter,
+      counter: counterVal,
     },
     requireUserVerification: false,
   };

@@ -1281,7 +1281,7 @@ app.get('/auth/google/callback', async (req: Request, res: Response) => {
     const userInfo = await exchangeGoogleCode(code, '', callbackUrl);
     const user = await upsertGoogleUser(userInfo);
     const sessionToken = signSessionToken({ userId: user.id, email: user.email, passkeyOk: false });
-    const isProd = process.env.NODE_ENV === 'production';
+    const isProd = isHosted();
     res.cookie('nv_session', sessionToken, {
       httpOnly: true,
       secure: isProd,
@@ -1317,7 +1317,7 @@ app.post('/auth/email/verify', async (req: Request, res: Response) => {
   try {
     const { email, code } = req.body || {};
     const result = await verifyEmailOtp(email, code);
-    const isProd = process.env.NODE_ENV === 'production';
+    const isProd = isHosted();
     res.cookie('nv_session', result.sessionToken, {
       httpOnly: true,
       secure: isProd,
@@ -1479,7 +1479,7 @@ app.post('/auth/passkey/login/finish', async (req: Request, res: Response) => {
 
     // Session elevated with passkeyOk: true
     const sessionToken = signSessionToken({ userId: passkey.user_id, email: user?.email || '', passkeyOk: true });
-    const isProd = process.env.NODE_ENV === 'production';
+    const isProd = isHosted();
     res.cookie('nv_session', sessionToken, {
       httpOnly: true,
       secure: isProd,
