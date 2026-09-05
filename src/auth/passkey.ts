@@ -1,4 +1,6 @@
+import crypto from 'node:crypto';
 import { supabase } from '../supabase.js';
+import { SESSION_SECRET } from './session.js';
 
 let simpleWebAuthnPromise: Promise<typeof import('@simplewebauthn/server')> | null = null;
 
@@ -55,6 +57,42 @@ interface StoredChallenge {
 
 export const challengeStore = new Map<string, StoredChallenge>();
 
+export function signChallengeToken(challenge: string, userId?: string | null): string {
+  const secret = SESSION_SECRET || 'northveil-default-webauthn-secret';
+  const payload = JSON.stringify({
+    c: challenge,
+    u: userId || null,
+    exp: Date.now() + 5 * 60 * 1000,
+  });
+  const b64 = Buffer.from(payload, 'utf8').toString('base64url');
+  const sig = crypto.createHmac('sha256', secret).update(b64).digest('base64url');
+  return `${b64}.${sig}`;
+}
+
+export function verifyChallengeToken(token?: string | null): { challenge: string; userId?: string | null } | null {
+  if (!token || typeof token !== 'string' || !token.includes('.')) return null;
+  const [b64, sig] = token.split('.');
+  if (!b64 || !sig) return null;
+
+  const secret = SESSION_SECRET || 'northveil-default-webauthn-secret';
+  const expectedSig = crypto.createHmac('sha256', secret).update(b64).digest('base64url');
+  const bufA = Buffer.from(sig);
+  const bufB = Buffer.from(expectedSig);
+  if (bufA.length !== bufB.length || !crypto.timingSafeEqual(bufA, bufB)) {
+    return null;
+  }
+
+  try {
+    const payload = JSON.parse(Buffer.from(b64, 'base64url').toString('utf8'));
+    if (!payload.c || typeof payload.exp !== 'number' || payload.exp < Date.now()) {
+      return null;
+    }
+    return { challenge: payload.c, userId: payload.u };
+  } catch {
+    return null;
+  }
+}
+
 export async function saveWebauthnChallenge(opts: {
   userId?: string | null;
   kind: 'reg' | 'auth';
@@ -70,14 +108,22 @@ export async function saveWebauthnChallenge(opts: {
       challenge: opts.challenge,
       expires_at: expiresAt,
     });
-    if (error) throw error;
+    if (error) {
+      console.warn('[Northveil] saveWebauthnChallenge supabase warning:', error.message);
+    }
   } catch (err: any) {
-    // In-memory fallback
-    challengeStore.set(`${opts.kind}_${opts.userId || opts.challenge}`, {
-      challenge: opts.challenge,
-      userId: opts.userId || undefined,
-      expiresAt: Date.now() + ttl,
-    });
+    console.warn('[Northveil] saveWebauthnChallenge fallback error:', err?.message);
+  }
+
+  const storeEntry: StoredChallenge = {
+    challenge: opts.challenge,
+    userId: opts.userId || undefined,
+    expiresAt: Date.now() + ttl,
+  };
+  challengeStore.set(`${opts.kind}_${opts.challenge}`, storeEntry);
+  challengeStore.set(`raw_${opts.challenge}`, storeEntry);
+  if (opts.userId) {
+    challengeStore.set(`${opts.kind}_${opts.userId}`, storeEntry);
   }
 }
 
@@ -95,11 +141,10 @@ export async function consumeWebauthnChallenge(opts: {
       .gt('expires_at', now)
       .order('created_at', { ascending: false });
 
-    if (opts.userId) {
-      query = query.eq('user_id', opts.userId);
-    }
     if (opts.challenge) {
       query = query.eq('challenge', opts.challenge);
+    } else if (opts.userId) {
+      query = query.eq('user_id', opts.userId);
     }
 
     const { data, error } = await query.limit(1);
@@ -108,16 +153,21 @@ export async function consumeWebauthnChallenge(opts: {
       await supabase.from('webauthn_challenges').delete().eq('id', match.id);
       return match.challenge;
     }
-  } catch {}
+  } catch (err: any) {
+    console.warn('[Northveil] consumeWebauthnChallenge DB error:', err?.message);
+  }
 
   const keys = [
-    `${opts.kind}_${opts.userId || ''}`,
+    `raw_${opts.challenge || ''}`,
     `${opts.kind}_${opts.challenge || ''}`,
-    `reg_${opts.userId || ''}`,
-    `auth_${opts.userId || ''}`,
     `auth_raw_${opts.challenge || ''}`,
+    `auth_${opts.challenge || ''}`,
+    `${opts.kind}_${opts.userId || ''}`,
+    `auth_${opts.userId || ''}`,
+    `reg_${opts.userId || ''}`,
   ];
   for (const k of keys) {
+    if (!k || k === 'raw_' || k.endsWith('_')) continue;
     const stored = challengeStore.get(k);
     if (stored && stored.expiresAt > Date.now()) {
       challengeStore.delete(k);
@@ -170,7 +220,12 @@ export async function generatePasskeyRegistrationOptions(opts: {
     challenge: options.challenge,
   });
 
-  return options;
+  const challengeToken = signChallengeToken(options.challenge, opts.userId);
+
+  return {
+    ...options,
+    challengeToken,
+  };
 }
 
 /**
@@ -196,7 +251,12 @@ export async function generatePasskeyLoginOptions(opts?: {
     challenge: options.challenge,
   });
 
-  return options;
+  const challengeToken = signChallengeToken(options.challenge, opts?.userId);
+
+  return {
+    ...options,
+    challengeToken,
+  };
 }
 
 /**

@@ -50,6 +50,8 @@ import {
   getRpId,
   allowedOrigins,
   challengeStore,
+  signChallengeToken,
+  verifyChallengeToken,
 } from './auth/passkey.js';
 import { startEmailOtp, verifyEmailOtp, nextStep } from './auth/emailOtp.js';
 import crypto from 'node:crypto';
@@ -1350,6 +1352,20 @@ app.post('/auth/passkey/register/begin', async (req: Request, res: Response) => 
       hostname: clientHostname,
       rpID: req.body?.rpID,
     });
+
+    const isProd = isHosted();
+    const domain = isProd ? '.northveil.xyz' : undefined;
+    if (options.challengeToken) {
+      res.cookie('nv_challenge', options.challengeToken, {
+        httpOnly: true,
+        secure: isProd,
+        sameSite: isProd ? 'none' : 'lax',
+        path: '/',
+        domain,
+        maxAge: 5 * 60 * 1000,
+      });
+    }
+
     return res.json({ ...options, options });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
@@ -1370,10 +1386,36 @@ app.post('/auth/passkey/register/finish', async (req: Request, res: Response) =>
     return res.status(400).json({ error: 'PASSKEY_RESPONSE_MALFORMED', message: err.message });
   }
 
-  const challenge = await consumeWebauthnChallenge({ userId, kind: 'reg' });
+  let rawChallenge: string | undefined;
+  if (cred?.response?.clientDataJSON) {
+    try {
+      rawChallenge = JSON.parse(Buffer.from(cred.response.clientDataJSON, 'base64url').toString('utf8')).challenge;
+    } catch {}
+  }
+
+  const cookieMatch = req.headers.cookie?.match(/nv_challenge=([^;]+)/);
+  const rawToken = req.body?.challengeToken || (cookieMatch ? cookieMatch[1] : undefined);
+  const tokenVerified = rawToken ? verifyChallengeToken(rawToken) : null;
+
+  const candidateChallenge = req.body?.challenge || tokenVerified?.challenge || rawChallenge;
+
+  let challenge = await consumeWebauthnChallenge({ userId, kind: 'reg', challenge: candidateChallenge });
+  if (!challenge && tokenVerified?.challenge) {
+    if (!rawChallenge || rawChallenge === tokenVerified.challenge) {
+      challenge = tokenVerified.challenge;
+    }
+  }
+
   if (!challenge) {
     return res.status(400).json({ error: 'CHALLENGE_EXPIRED_OR_NOT_FOUND' });
   }
+
+  const isProd = isHosted();
+  res.clearCookie('nv_challenge', {
+    path: '/',
+    domain: isProd ? '.northveil.xyz' : undefined,
+  });
+
   try {
     const clientHostname = req.body?.hostname || (req.headers.origin ? new URL(req.headers.origin as string).hostname : req.hostname);
     const verified = await verifyPasskeyRegistration({
@@ -1413,6 +1455,20 @@ app.post('/auth/passkey/login/begin', async (req: Request, res: Response) => {
       hostname: clientHostname,
       rpID: req.body?.rpID,
     });
+
+    const isProd = isHosted();
+    const domain = isProd ? '.northveil.xyz' : undefined;
+    if (options.challengeToken) {
+      res.cookie('nv_challenge', options.challengeToken, {
+        httpOnly: true,
+        secure: isProd,
+        sameSite: isProd ? 'none' : 'lax',
+        path: '/',
+        domain,
+        maxAge: 5 * 60 * 1000,
+      });
+    }
+
     return res.json({ ...options, options });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
@@ -1427,7 +1483,7 @@ app.post('/auth/passkey/login/finish', async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'PASSKEY_RESPONSE_MALFORMED', message: err.message });
   }
 
-  const { credentialId, challenge } = req.body || {};
+  const { credentialId, challenge, challengeToken: bodyChallengeToken } = req.body || {};
   const credId = credentialId || cred?.id;
   if (!credId) {
     return res.status(400).json({ error: 'CREDENTIAL_ID_REQUIRED' });
@@ -1437,27 +1493,59 @@ app.post('/auth/passkey/login/finish', async (req: Request, res: Response) => {
     return res.status(404).json({ error: 'PASSKEY_NOT_FOUND' });
   }
 
-  let expectedChallenge = challenge;
-  if (!expectedChallenge) {
-    let rawChallenge: string | undefined;
-    if (cred?.response?.clientDataJSON) {
-      try {
-        rawChallenge = JSON.parse(Buffer.from(cred.response.clientDataJSON, 'base64url').toString('utf8')).challenge;
-      } catch {}
-    }
+  let rawChallenge: string | undefined;
+  if (cred?.response?.clientDataJSON) {
+    try {
+      rawChallenge = JSON.parse(Buffer.from(cred.response.clientDataJSON, 'base64url').toString('utf8')).challenge;
+    } catch {}
+  }
+
+  const cookieMatch = req.headers.cookie?.match(/nv_challenge=([^;]+)/);
+  const rawToken = bodyChallengeToken || (cookieMatch ? cookieMatch[1] : undefined);
+  const tokenVerified = rawToken ? verifyChallengeToken(rawToken) : null;
+
+  const candidateChallenge = challenge || tokenVerified?.challenge || rawChallenge;
+
+  let expectedChallenge: string | null = null;
+  if (candidateChallenge) {
     const consumed = await consumeWebauthnChallenge({
       userId: passkey.user_id,
       kind: 'auth',
+      challenge: candidateChallenge,
+    });
+    if (consumed) {
+      expectedChallenge = consumed;
+    }
+  }
+
+  if (!expectedChallenge && tokenVerified?.challenge) {
+    if (!rawChallenge || rawChallenge === tokenVerified.challenge) {
+      expectedChallenge = tokenVerified.challenge;
+    }
+  }
+
+  if (!expectedChallenge && rawChallenge) {
+    const fallbackConsumed = await consumeWebauthnChallenge({
+      kind: 'auth',
       challenge: rawChallenge,
     });
-    if (consumed) expectedChallenge = consumed;
+    if (fallbackConsumed) {
+      expectedChallenge = fallbackConsumed;
+    }
+  }
+
+  if (!expectedChallenge) {
+    return res.status(400).json({
+      error: 'CHALLENGE_EXPIRED_OR_NOT_FOUND',
+      message: 'Authentication challenge expired or not found. Please click Unlock Vault with Passkey to try again.',
+    });
   }
 
   try {
     const clientHostname = req.body?.hostname || (req.headers.origin ? new URL(req.headers.origin as string).hostname : req.hostname);
     await verifyPasskeyLogin({
       response: cred,
-      expectedChallenge: expectedChallenge || '',
+      expectedChallenge,
       storedAuthenticator: {
         credentialID: Buffer.from(passkey.credential_id, 'base64url'),
         credentialPublicKey: passkey.credential_public_key,
@@ -1465,6 +1553,12 @@ app.post('/auth/passkey/login/finish', async (req: Request, res: Response) => {
       },
       origin: req.headers.origin as string,
       hostname: clientHostname,
+    });
+
+    const isProd = isHosted();
+    res.clearCookie('nv_challenge', {
+      path: '/',
+      domain: isProd ? '.northveil.xyz' : undefined,
     });
 
     const { data: user } = await supabase.from('users').select('*').eq('id', passkey.user_id).maybeSingle();
@@ -1479,13 +1573,13 @@ app.post('/auth/passkey/login/finish', async (req: Request, res: Response) => {
 
     // Session elevated with passkeyOk: true
     const sessionToken = signSessionToken({ userId: passkey.user_id, email: user?.email || '', passkeyOk: true });
-    const isProd = isHosted();
     res.cookie('nv_session', sessionToken, {
       httpOnly: true,
       secure: isProd,
-      sameSite: 'lax',
-      maxAge: 72 * 3600 * 1000,
+      sameSite: isProd ? 'none' : 'lax',
+      path: '/',
       domain: isProd ? '.northveil.xyz' : undefined,
+      maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
     return res.json({
