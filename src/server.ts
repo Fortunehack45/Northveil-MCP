@@ -999,7 +999,7 @@ app.post('/wallet/turnkey/stamp', async (req: Request, res: Response) => {
 });
 
 // POST /wallet/requests/:id/stamp-complete - user stamped activity submission and broadcast
-app.post(['/wallet/requests/:id/stamp-complete', '/api/approvals/:id/stamp-complete'], requireSession, async (req: Request, res: Response) => {
+app.post(['/wallet/requests/:id/stamp-complete', '/api/approvals/:id/stamp-complete', '/wallet/approvals/:id/stamp-complete'], requireSession, async (req: Request, res: Response) => {
   const row = await loadRequest(req.params.id);
   if (!row) return res.status(404).json({ error: 'REQUEST_NOT_FOUND' });
   if (row.user_id && req.session?.userId && row.user_id !== req.session.userId) {
