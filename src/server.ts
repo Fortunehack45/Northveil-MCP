@@ -1594,8 +1594,17 @@ app.post('/auth/passkey/login/finish', async (req: Request, res: Response) => {
         ? { id: user.id, email: user.email, name: user.name, avatarUrl: user.avatar_url }
         : { id: passkey.user_id },
       wallet: wallet
-        ? { id: wallet.id, address: wallet.address, chainFamily: wallet.chain_family, mpcWalletId: wallet.mpc_wallet_id }
+        ? { id: wallet.id, name: wallet.name, address: wallet.address, chainFamily: wallet.chain_family, mpcWalletId: wallet.mpc_wallet_id, is_primary: wallet.is_primary }
         : null,
+      wallets: (wallets || []).map((w: any) => ({
+        id: w.id,
+        name: w.name,
+        address: w.address,
+        chainFamily: w.chain_family,
+        mpcWalletId: w.mpc_wallet_id,
+        is_primary: w.is_primary,
+        status: w.status,
+      })),
     });
   } catch (err: any) {
     return res.status(400).json({ error: err.message || 'PASSKEY_LOGIN_FAILED' });
