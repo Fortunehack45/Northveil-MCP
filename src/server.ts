@@ -22,7 +22,8 @@ import {
 import { submitIntent, getRequest, loadRequest, updateRequest, insertSignPermit, signAndAdvance, assertSignPermit } from './wallet/requestLifecycle.js';
 import { setAutonomousMode } from './tools/setAutonomousMode.js';
 import { issueClientKey } from './auth/agentClient.js';
-import { supabase } from './supabase.js';
+import { supabase, checkAndEnsureWorkingKey } from './supabase.js';
+
 import { logAudit } from './audit/log.js';
 import { SUPPORTED_CHAINS, WRITE_CHAINS, READ_EXTRA_CHAINS } from './config/chains.js';
 import { getBalances, getNftBalances } from './read/balances.js';
@@ -93,6 +94,11 @@ console.log('[Northveil] boot: signer=turnkey (MPC hardware enclave)');
 
 export const app = express();
 app.set('trust proxy', 1);
+app.use(async (_req: Request, _res: Response, next: NextFunction) => {
+  await checkAndEnsureWorkingKey();
+  next();
+});
+
 
 // Guard against custodial keys configured in cloud environment variables
 const activeForbiddenEnvs = ['PRIVATE_KEY', 'SEPOLIA_PRIVATE_KEY', 'ETH_PRIVATE_KEY'].filter(

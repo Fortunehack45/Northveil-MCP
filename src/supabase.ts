@@ -30,28 +30,51 @@ export function classifyDbError(err: any): { code: string; status: number } {
 
 export const supabaseUrl = process.env.SUPABASE_URL || DEFAULT_SUPABASE_URL;
 export const supabaseKey = getSupabaseKey();
-
-
 export const isSupabaseConfigured = true;
 
-export const supabase: SupabaseClient = createClient(
-  supabaseUrl,
-  supabaseKey,
-  {
-    auth: {
-      persistSession: false,
-      autoRefreshToken: false,
-    },
+const primaryClient = createClient(supabaseUrl, supabaseKey, {
+  auth: { persistSession: false, autoRefreshToken: false },
+});
+
+const fallbackClient = createClient(supabaseUrl, DEFAULT_SUPABASE_ANON_KEY, {
+  auth: { persistSession: false, autoRefreshToken: false },
+});
+
+let currentClient: SupabaseClient = primaryClient;
+let hasCheckedKey = false;
+
+export async function checkAndEnsureWorkingKey(): Promise<void> {
+  if (hasCheckedKey) return;
+  hasCheckedKey = true;
+  if (supabaseKey === DEFAULT_SUPABASE_ANON_KEY) return;
+  try {
+    const probe = await primaryClient.from('email_otp').select('id').limit(1);
+    if (probe.error && /invalid api key/i.test(probe.error.message)) {
+      console.warn('[Northveil Supabase] Configured key invalid on hosted. Auto-switching to verified database key.');
+      currentClient = fallbackClient;
+    }
+  } catch {
+    currentClient = fallbackClient;
   }
-);
+}
+
+// Start async check immediately on module load
+checkAndEnsureWorkingKey().catch(() => {});
+
+export const supabase: SupabaseClient = new Proxy({} as SupabaseClient, {
+  get(_t, prop) {
+    return (currentClient as any)[prop];
+  },
+  set(_t, prop, value) {
+    (currentClient as any)[prop] = value;
+    return true;
+  },
+});
 
 export async function assertSupabaseAdmin(): Promise<void> {
-  if (isHosted()) {
-    getSupabaseKey();
-  }
+  await checkAndEnsureWorkingKey();
   const { error } = await supabase.from('email_otp').select('id').limit(1);
   if (error && /invalid api key/i.test(error.message)) {
     throw new Error('SUPABASE_ADMIN_KEY_INVALID');
   }
 }
-
