@@ -282,7 +282,7 @@ export function toolCatalog(): McpToolDefinition[] {
     // 17. Set autonomous mode (write)
     {
       name: 'nv_set_autonomous_mode',
-      description: 'Request enabling autonomous mode for this agent within strict spending limits.',
+      description: 'Configure autonomous policy limits for this agent. Note: autonomous signature execution requires a scoped delegate key in Turnkey sub-org and fails closed (AUTONOMOUS_REQUIRES_DELEGATE_KEY) until delegate provisioning is active. Always-ask with passkey remains the standard path.',
       inputSchema: {
         type: 'object',
         required: ['enabled'],

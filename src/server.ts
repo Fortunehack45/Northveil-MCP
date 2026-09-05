@@ -45,6 +45,7 @@ import {
   verifyPasskeyLogin,
   savePasskeyRecord,
   findPasskeyByCredentialId,
+  unpackCredentialPublicKey,
   saveWebauthnChallenge,
   consumeWebauthnChallenge,
   getRpId,
@@ -612,8 +613,12 @@ async function handleSseConnection(req: Request, res: Response) {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
-  res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  const sseOrigin = req.headers.origin as string | undefined;
+  if (sseOrigin && originOk(sseOrigin)) {
+    res.setHeader('Access-Control-Allow-Origin', sseOrigin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Vary', 'Origin');
+  }
   res.flushHeaders();
 
   const sessionId = 'sse_' + crypto.randomUUID().replace(/-/g, '').slice(0, 16);
@@ -779,7 +784,7 @@ async function handleApprovalCompletion(req: Request, res: Response) {
         expectedChallenge: Buffer.from(ticket.payloadHash.replace(/^0x/, ''), 'hex').toString('base64url'),
         storedAuthenticator: {
           credentialID: Buffer.from(passkeyRecord.credential_id, 'base64url'),
-          credentialPublicKey: Buffer.from(passkeyRecord.credential_public_key),
+          credentialPublicKey: unpackCredentialPublicKey(passkeyRecord.credential_public_key),
           counter: Number(passkeyRecord.counter),
         },
       });

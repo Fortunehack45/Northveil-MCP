@@ -93,6 +93,12 @@ export function verifyChallengeToken(token?: string | null): { challenge: string
   }
 }
 
+const isHostedOrProd = Boolean(
+  process.env.VERCEL ||
+  process.env.NODE_ENV === 'production' ||
+  process.env.NORTHVEIL_HOSTED === '1'
+);
+
 export async function saveWebauthnChallenge(opts: {
   userId?: string | null;
   kind: 'reg' | 'auth';
@@ -109,21 +115,24 @@ export async function saveWebauthnChallenge(opts: {
       expires_at: expiresAt,
     });
     if (error) {
-      console.warn('[Northveil] saveWebauthnChallenge supabase warning:', error.message);
+      console.error('[Northveil] webauthn_challenges Supabase write failed:', error.message, error.code, error.details);
     }
   } catch (err: any) {
-    console.warn('[Northveil] saveWebauthnChallenge fallback error:', err?.message);
+    console.error('[Northveil] webauthn_challenges Supabase write failed:', err?.message, err?.code, err?.details);
   }
 
-  const storeEntry: StoredChallenge = {
-    challenge: opts.challenge,
-    userId: opts.userId || undefined,
-    expiresAt: Date.now() + ttl,
-  };
-  challengeStore.set(`${opts.kind}_${opts.challenge}`, storeEntry);
-  challengeStore.set(`raw_${opts.challenge}`, storeEntry);
-  if (opts.userId) {
-    challengeStore.set(`${opts.kind}_${opts.userId}`, storeEntry);
+  // Only use in-memory store in genuine local dev (never across serverless/hosted instances)
+  if (!isHostedOrProd) {
+    const storeEntry: StoredChallenge = {
+      challenge: opts.challenge,
+      userId: opts.userId || undefined,
+      expiresAt: Date.now() + ttl,
+    };
+    challengeStore.set(`${opts.kind}_${opts.challenge}`, storeEntry);
+    challengeStore.set(`raw_${opts.challenge}`, storeEntry);
+    if (opts.userId) {
+      challengeStore.set(`${opts.kind}_${opts.userId}`, storeEntry);
+    }
   }
 }
 
@@ -148,30 +157,36 @@ export async function consumeWebauthnChallenge(opts: {
     }
 
     const { data, error } = await query.limit(1);
+    if (error) {
+      console.error('[Northveil] consumeWebauthnChallenge Supabase select error:', error.message, error.code, error.details);
+    }
     if (!error && data && data.length > 0) {
       const match = data[0];
       await supabase.from('webauthn_challenges').delete().eq('id', match.id);
       return match.challenge;
     }
   } catch (err: any) {
-    console.warn('[Northveil] consumeWebauthnChallenge DB error:', err?.message);
+    console.error('[Northveil] consumeWebauthnChallenge DB error:', err?.message, err?.code, err?.details);
   }
 
-  const keys = [
-    `raw_${opts.challenge || ''}`,
-    `${opts.kind}_${opts.challenge || ''}`,
-    `auth_raw_${opts.challenge || ''}`,
-    `auth_${opts.challenge || ''}`,
-    `${opts.kind}_${opts.userId || ''}`,
-    `auth_${opts.userId || ''}`,
-    `reg_${opts.userId || ''}`,
-  ];
-  for (const k of keys) {
-    if (!k || k === 'raw_' || k.endsWith('_')) continue;
-    const stored = challengeStore.get(k);
-    if (stored && stored.expiresAt > Date.now()) {
-      challengeStore.delete(k);
-      return stored.challenge;
+  // Only fall back to in-memory store in local dev
+  if (!isHostedOrProd) {
+    const keys = [
+      `raw_${opts.challenge || ''}`,
+      `${opts.kind}_${opts.challenge || ''}`,
+      `auth_raw_${opts.challenge || ''}`,
+      `auth_${opts.challenge || ''}`,
+      `${opts.kind}_${opts.userId || ''}`,
+      `auth_${opts.userId || ''}`,
+      `reg_${opts.userId || ''}`,
+    ];
+    for (const k of keys) {
+      if (!k || k === 'raw_' || k.endsWith('_')) continue;
+      const stored = challengeStore.get(k);
+      if (stored && stored.expiresAt > Date.now()) {
+        challengeStore.delete(k);
+        return stored.challenge;
+      }
     }
   }
   return null;
@@ -365,6 +380,64 @@ export async function verifyPasskeyForPayload(opts: {
 }
 
 /**
+ * Unpacks credential public key from any stored format (Postgres bytea hex \x...,
+ * JSON-serialized Buffer {type: 'Buffer', data: [...]}, string, Buffer, or array)
+ * into a clean COSE Key binary Buffer.
+ */
+export function unpackCredentialPublicKey(raw: any): Buffer {
+  if (!raw) return Buffer.alloc(0);
+
+  // If it's already an object with data array: { type: 'Buffer', data: [...] }
+  if (typeof raw === 'object' && !Buffer.isBuffer(raw) && Array.isArray(raw.data)) {
+    return Buffer.from(raw.data);
+  }
+
+  // If it's a string
+  if (typeof raw === 'string') {
+    const s = raw.trim();
+    if (s.startsWith('\\x')) {
+      const bufFromHex = Buffer.from(s.slice(2), 'hex');
+      try {
+        const asStr = bufFromHex.toString('utf8');
+        if (asStr.startsWith('{') && asStr.includes('"data"')) {
+          const parsed = JSON.parse(asStr);
+          if (Array.isArray(parsed.data)) return Buffer.from(parsed.data);
+        }
+      } catch {}
+      return bufFromHex;
+    }
+    if (s.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(s);
+        if (Array.isArray(parsed.data)) return Buffer.from(parsed.data);
+      } catch {}
+    }
+    // Hex string check
+    if (/^[0-9a-fA-F]+$/.test(s)) {
+      return Buffer.from(s, 'hex');
+    }
+    return Buffer.from(s, 'base64');
+  }
+
+  // If it's a Buffer
+  if (Buffer.isBuffer(raw)) {
+    try {
+      const asStr = raw.toString('utf8');
+      if (asStr.startsWith('\\x')) {
+        return unpackCredentialPublicKey(asStr);
+      }
+      if (asStr.startsWith('{') && asStr.includes('"data"')) {
+        const parsed = JSON.parse(asStr);
+        if (Array.isArray(parsed.data)) return Buffer.from(parsed.data);
+      }
+    } catch {}
+    return raw;
+  }
+
+  return Buffer.from(raw);
+}
+
+/**
  * Saves registered passkey credential to Supabase public.passkeys
  */
 export async function savePasskeyRecord(opts: {
@@ -376,17 +449,22 @@ export async function savePasskeyRecord(opts: {
   walletIds?: string[];
 }): Promise<void> {
   try {
-    await supabase.from('passkeys').insert({
+    const rawKey = opts.credentialPublicKey;
+    const hexKey = `\\x${rawKey.toString('hex')}`;
+    const { error } = await supabase.from('passkeys').insert({
       user_id: opts.userId,
       credential_id: opts.credentialId,
-      credential_public_key: opts.credentialPublicKey,
+      credential_public_key: hexKey,
       counter: opts.counter,
       transports: opts.transports || [],
       wallet_ids: opts.walletIds || [],
       last_used_at: new Date().toISOString(),
     });
+    if (error) {
+      console.error('[Northveil] savePasskeyRecord Supabase insert error:', error.message, error.code, error.details);
+    }
   } catch (err: any) {
-    console.warn('[Northveil] savePasskeyRecord db notice:', err?.message);
+    console.error('[Northveil] savePasskeyRecord error:', err?.message);
   }
 }
 
@@ -402,25 +480,29 @@ export async function findPasskeyByCredentialId(credentialId: string): Promise<{
   wallet_ids?: string[];
 } | null> {
   try {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('passkeys')
       .select('*')
       .eq('credential_id', credentialId)
       .maybeSingle();
+
+    if (error) {
+      console.error('[Northveil] findPasskeyByCredentialId Supabase error:', error.message, error.code);
+    }
 
     if (data) {
       return {
         id: data.id,
         user_id: data.user_id,
         credential_id: data.credential_id,
-        credential_public_key: Buffer.isBuffer(data.credential_public_key)
-          ? data.credential_public_key
-          : Buffer.from(data.credential_public_key),
+        credential_public_key: unpackCredentialPublicKey(data.credential_public_key),
         counter: Number(data.counter || 0),
         wallet_ids: data.wallet_ids || [],
       };
     }
-  } catch {}
+  } catch (err: any) {
+    console.error('[Northveil] findPasskeyByCredentialId unexpected error:', err?.message);
+  }
 
   return null;
 }
