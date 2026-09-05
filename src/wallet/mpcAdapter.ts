@@ -105,7 +105,8 @@ export async function attachExistingTurnkeyWallet(userId: string): Promise<{ mpc
 
     const matching = walletsList.find((w: any) =>
       typeof w.walletName === 'string' && w.walletName.includes(userId)
-    ) || (walletsList.length > 0 ? walletsList[walletsList.length - 1] : null);
+    );
+
 
     if (!matching || !matching.walletId) {
       return null;

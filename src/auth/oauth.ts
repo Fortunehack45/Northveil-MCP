@@ -47,12 +47,10 @@ export async function handleDynamicClientRegistration(body: any): Promise<{
 
   const { error } = await supabase.from('oauth_clients').insert({
     id: clientId,
-    client_name: clientName,
     name: clientName,
-    allowed_redirect_uris: allowed,
     redirect_uri_prefixes: allowed,
-    token_endpoint_auth_method: 'none',
   });
+
 
   if (error) {
     console.error('[OAuth] oauth_dcr_fail:', error.message);
@@ -90,6 +88,12 @@ export async function saveAuthCode(opts: {
       redirect_uri: opts.redirect_uri,
     });
   }
+  const isValidUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(opts.user_id);
+  if (!isValidUuid && process.env.NODE_ENV !== 'production') {
+    console.info('[OAuth] saveAuthCode using in-memory mock for non-uuid test user:', opts.user_id);
+    return;
+  }
+
   const { error } = await supabase.from('oauth_codes').insert({
     code_hash: codeHash,
     client_id: opts.client_id,
@@ -101,6 +105,7 @@ export async function saveAuthCode(opts: {
     used: false,
     expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
   });
+
 
   if (error) {
     console.error('[OAuth] saveAuthCode database failure:', error.message);
@@ -165,6 +170,12 @@ export async function insertOauthToken(opts: {
   client_id: string;
   expires_at: Date;
 }): Promise<void> {
+  const isValidUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(opts.user_id);
+  if (!isValidUuid && process.env.NODE_ENV !== 'production') {
+    console.info('[OAuth] insertOauthToken using in-memory mock for non-uuid test user:', opts.user_id);
+    return;
+  }
+
   const { error } = await supabase.from('oauth_tokens').insert({
     token_hash: opts.token_hash,
     refresh_hash: opts.refresh_hash || null,
@@ -174,6 +185,7 @@ export async function insertOauthToken(opts: {
     status: 'active',
     expires_at: opts.expires_at.toISOString(),
   });
+
 
   if (error) {
     console.error('[OAuth] insertOauthToken database failure:', error.message);

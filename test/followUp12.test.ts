@@ -10,6 +10,7 @@ console.log('=== Running Follow-Up 12 Non-Custodial Request Lifecycle Tests ==='
 
 async function main() {
   process.env.ALLOW_MOCK_SIGNER = '1';
+  process.env.ALLOW_ORG_ROOT_SIGN = '1';
 
   const server = http.createServer(app);
   await new Promise<void>((resolve) => server.listen(0, resolve));

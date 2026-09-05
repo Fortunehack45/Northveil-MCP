@@ -254,10 +254,31 @@ export async function generatePasskeyLoginOptions(opts?: {
   const { generateAuthenticationOptions } = await getSimpleWebAuthn();
   const effectiveRpId = getRpId(opts?.hostname || opts?.rpID);
 
+  let allowCredentials: any[] | undefined = undefined;
+  if (opts?.userId) {
+    try {
+      const { data: userPasskeys } = await supabase
+        .from('passkeys')
+        .select('credential_id, transports')
+        .eq('user_id', opts.userId);
+
+      if (userPasskeys && userPasskeys.length > 0) {
+        allowCredentials = userPasskeys.map((pk: any) => ({
+          id: pk.credential_id,
+          type: 'public-key' as const,
+          transports: Array.isArray(pk.transports) ? pk.transports : undefined,
+        }));
+      }
+    } catch (e: any) {
+      console.warn('[Northveil] generatePasskeyLoginOptions allowCredentials lookup notice:', e?.message);
+    }
+  }
+
   const options = await generateAuthenticationOptions({
     rpID: effectiveRpId,
     userVerification: 'preferred',
     timeout: 120_000,
+    allowCredentials,
   });
 
   await saveWebauthnChallenge({
@@ -273,6 +294,7 @@ export async function generatePasskeyLoginOptions(opts?: {
     challengeToken,
   };
 }
+
 
 /**
  * Verifies WebAuthn passkey registration response from navigator.credentials.create()
@@ -480,10 +502,17 @@ export async function findPasskeyByCredentialId(credentialId: string): Promise<{
   wallet_ids?: string[];
 } | null> {
   try {
+    const rawId = credentialId.trim();
+    const urlVariant = rawId.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+    const stdVariant = rawId.replace(/-/g, '+').replace(/_/g, '/');
+    const paddedVariant = stdVariant.padEnd(Math.ceil(stdVariant.length / 4) * 4, '=');
+    const candidates = Array.from(new Set([rawId, urlVariant, stdVariant, paddedVariant]));
+
     const { data, error } = await supabase
       .from('passkeys')
       .select('*')
-      .eq('credential_id', credentialId)
+      .in('credential_id', candidates)
+      .limit(1)
       .maybeSingle();
 
     if (error) {
@@ -506,3 +535,4 @@ export async function findPasskeyByCredentialId(credentialId: string): Promise<{
 
   return null;
 }
+

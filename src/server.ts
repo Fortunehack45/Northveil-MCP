@@ -1513,11 +1513,40 @@ app.post('/auth/passkey/register/finish', async (req: Request, res: Response) =>
       transports: req.body?.response?.transports || cred?.response?.transports,
       walletIds: existingWalletIds,
     });
-    return res.json({ success: true, credentialId: verified.credentialId });
+
+    const { data: userRecord } = await supabase
+      .from('users')
+      .select('id, email')
+      .eq('id', userId)
+      .maybeSingle();
+
+    const elevatedToken = signSessionToken({
+      userId,
+      email: userRecord?.email,
+      passkeyOk: true,
+    });
+
+    res.cookie('nv_session', elevatedToken, {
+      httpOnly: true,
+      secure: isProd,
+      sameSite: isProd ? 'none' : 'lax',
+      path: '/',
+      domain: isProd ? '.northveil.xyz' : undefined,
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+
+    return res.json({
+      success: true,
+      credentialId: verified.credentialId,
+      sessionToken: elevatedToken,
+      passkeyOk: true,
+      user: { id: userId, email: userRecord?.email },
+    });
   } catch (err: any) {
     return res.status(400).json({ error: err.message || 'PASSKEY_REGISTRATION_FAILED' });
   }
 });
+
 
 app.post('/auth/passkey/login/begin', async (req: Request, res: Response) => {
   try {
@@ -1562,8 +1591,13 @@ app.post('/auth/passkey/login/finish', async (req: Request, res: Response) => {
   }
   const passkey = await findPasskeyByCredentialId(credId);
   if (!passkey) {
-    return res.status(404).json({ error: 'PASSKEY_NOT_FOUND' });
+    return res.status(404).json({
+      error: 'PASSKEY_NOT_FOUND',
+      message: 'No passkey found on this device for your account. Please set up a passkey on this device.',
+      canEnroll: true,
+    });
   }
+
 
   let rawChallenge: string | undefined;
   if (cred?.response?.clientDataJSON) {
@@ -1794,9 +1828,10 @@ app.post('/wallet/import/finish', requireSession, async (req: Request, res: Resp
         mpc_provider: 'turnkey',
         mpc_wallet_id: imported.mpcWalletId,
         status: 'active',
-      }, { onConflict: 'mpc_wallet_id' })
+      }, { onConflict: 'address' })
       .select('*')
       .single();
+
 
     if (error) {
       const msg = String(error.message || error);
@@ -1835,11 +1870,13 @@ app.post('/wallet/import/finish', requireSession, async (req: Request, res: Resp
     });
   } catch (err: any) {
     const msg = String(err?.message || err);
+    console.error('[Northveil] /wallet/import/finish error:', msg);
     if (/invalid api key/i.test(msg) || /SUPABASE_ADMIN_KEY_INVALID/i.test(msg)) {
       return res.status(503).json({ error: 'AUTH_DB_MISCONFIGURED', message: 'Northveil auth database is misconfigured. Try again in a minute.' });
     }
     return res.status(500).json({ error: err.message || 'IMPORT_FINISH_FAILED' });
   }
+
 });
 
 // POST /wallet/import - Direct plaintext key material import is strictly forbidden
@@ -1902,9 +1939,10 @@ app.get('/wallet/me', requireSession, async (req: Request, res: Response) => {
               mpc_wallet_id: attached.mpcWalletId,
               status: 'active',
               is_primary: true,
-            }, { onConflict: 'mpc_wallet_id' })
+            }, { onConflict: 'address' })
             .select('id, name, address, chain_family, mpc_wallet_id, is_primary, status')
             .single();
+
           if (!insErr && inserted) {
             safeWallets = [inserted];
           }
