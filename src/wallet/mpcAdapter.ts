@@ -37,6 +37,114 @@ export function allowOrgSign(): boolean {
   return !isHosted() && process.env.ALLOW_ORG_ROOT_SIGN === '1';
 }
 
+const ALREADY = /already imported/i;
+const WALLET_ID = /wallet\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+
+export function parseAlreadyImportedWalletId(message: string): string | null {
+  if (!ALREADY.test(message)) return null;
+  return message.match(WALLET_ID)?.[1] || null;
+}
+
+export async function fetchTurnkeyWalletAddress(mpcWalletId: string): Promise<string | null> {
+  if (!process.env.TURNKEY_API_PUBLIC_KEY || !process.env.TURNKEY_API_PRIVATE_KEY || !process.env.TURNKEY_ORGANIZATION_ID) {
+    if (process.env.NODE_ENV !== 'production') {
+      return '0x' + crypto.createHash('sha256').update(mpcWalletId).digest('hex').slice(0, 40);
+    }
+    return null;
+  }
+  try {
+    const { TurnkeyClient } = await import('@turnkey/http');
+    const { ApiKeyStamper } = await import('@turnkey/api-key-stamper');
+
+    const stamper = new ApiKeyStamper({
+      apiPublicKey: process.env.TURNKEY_API_PUBLIC_KEY,
+      apiPrivateKey: process.env.TURNKEY_API_PRIVATE_KEY,
+    });
+
+    const client = new TurnkeyClient(
+      { baseUrl: process.env.TURNKEY_BASE_URL || 'https://api.turnkey.com' },
+      stamper
+    );
+
+    const organizationId = process.env.TURNKEY_ORGANIZATION_ID;
+    const accountsResp = await client.getWalletAccounts({
+      organizationId,
+      walletId: mpcWalletId,
+    });
+
+    const accounts = (accountsResp as any)?.accounts || [];
+    const ethAcc = accounts.find((a: any) => a.addressFormat === 'ADDRESS_FORMAT_ETHEREUM' || (a.address && a.address.startsWith('0x'))) || accounts[0];
+    return ethAcc?.address ? ethAcc.address.toLowerCase() : null;
+  } catch (err: any) {
+    console.warn('[Northveil] fetchTurnkeyWalletAddress warning:', err?.message);
+    return null;
+  }
+}
+
+export async function attachExistingTurnkeyWallet(userId: string): Promise<{ mpcWalletId: string; address: string } | null> {
+  if (!process.env.TURNKEY_API_PUBLIC_KEY || !process.env.TURNKEY_API_PRIVATE_KEY || !process.env.TURNKEY_ORGANIZATION_ID) {
+    return null;
+  }
+  try {
+    const { TurnkeyClient } = await import('@turnkey/http');
+    const { ApiKeyStamper } = await import('@turnkey/api-key-stamper');
+
+    const stamper = new ApiKeyStamper({
+      apiPublicKey: process.env.TURNKEY_API_PUBLIC_KEY,
+      apiPrivateKey: process.env.TURNKEY_API_PRIVATE_KEY,
+    });
+
+    const client = new TurnkeyClient(
+      { baseUrl: process.env.TURNKEY_BASE_URL || 'https://api.turnkey.com' },
+      stamper
+    );
+
+    const organizationId = process.env.TURNKEY_ORGANIZATION_ID;
+    const walletsResp = await client.getWallets({ organizationId });
+    const walletsList: any[] = (walletsResp as any)?.wallets || [];
+
+    const matching = walletsList.find((w: any) =>
+      typeof w.walletName === 'string' && w.walletName.includes(userId)
+    ) || (walletsList.length > 0 ? walletsList[walletsList.length - 1] : null);
+
+    if (!matching || !matching.walletId) {
+      return null;
+    }
+
+    const address = await fetchTurnkeyWalletAddress(matching.walletId);
+    if (!address) return null;
+
+    return {
+      mpcWalletId: matching.walletId,
+      address: address.toLowerCase(),
+    };
+  } catch (err: any) {
+    console.warn('[Northveil] attachExistingTurnkeyWallet warning:', err?.message);
+    return null;
+  }
+}
+
+export async function importFinishOrAttach(
+  userId: string,
+  input: { encryptedBundle: string; name?: string }
+): Promise<{ mpcWalletId: string; address: string }> {
+  try {
+    const mpc = getMpcProvider();
+    if (typeof mpc.importFinish !== 'function') {
+      throw new Error('Signer provider does not support importFinish');
+    }
+    return await mpc.importFinish(userId, input);
+  } catch (err: any) {
+    const msg = String(err?.message || err);
+    const mpcWalletId = parseAlreadyImportedWalletId(msg);
+    if (!mpcWalletId) throw err;
+    const address = await fetchTurnkeyWalletAddress(mpcWalletId);
+    if (!address) throw err;
+    return { mpcWalletId, address: address.toLowerCase() };
+  }
+}
+
+
 export interface MpcProvider {
   createWallet(userId: string): Promise<{ mpcWalletId: string; address: string }>;
   importBegin?(userId: string): Promise<{ importBundle: string; organizationId: string; userId: string }>;
@@ -462,9 +570,10 @@ function devMockProvider(): MpcProvider {
       let addr = ethers.Wallet.createRandom().address.toLowerCase();
       if (input.privateKey) {
         try {
-          addr = new ethers.Wallet(input.privateKey.startsWith('0x') ? input.privateKey : '0x' + input.privateKey).address.toLowerCase();
+          addr = ethers.computeAddress(input.privateKey.startsWith('0x') ? input.privateKey : '0x' + input.privateKey).toLowerCase();
         } catch {}
       } else if (input.mnemonic) {
+
         try {
           const hash = ethers.keccak256(ethers.toUtf8Bytes(input.mnemonic.trim()));
           addr = ethers.computeAddress(hash);

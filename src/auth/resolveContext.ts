@@ -256,7 +256,10 @@ export async function resolveContext(
       } catch {}
     }
 
-    if (!match) throw new HttpError(401, 'TOKEN_INVALID', 'Invalid OAuth token', true);
+    if (!match) {
+      console.warn('[OAuth] oauth_token_lookup_miss', { hashPrefix: targetHash.slice(0, 8) });
+      throw new HttpError(401, 'TOKEN_INVALID', 'Invalid OAuth token', true);
+    }
 
     if (match.status === 'revoked' || match.status === 'paused') {
       throw new HttpError(403, 'CLIENT_REVOKED', 'Client access has been revoked');

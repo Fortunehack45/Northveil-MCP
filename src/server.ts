@@ -10,7 +10,15 @@ import { getPortfolio } from './tools/getPortfolio.js';
 import { getTransactionStatus } from './tools/getTransactionStatus.js';
 import { consumeApproval, getApproval, getApprovalAsync } from './wallet/approvals.js';
 import { verifyPasskeyForPayload, asWebAuthnCredentialJSON } from './auth/passkey.js';
-import { getMpcProvider, isHosted, allowOrgSign } from './wallet/mpcAdapter.js';
+import {
+  getMpcProvider,
+  isHosted,
+  allowOrgSign,
+  importFinishOrAttach,
+  attachExistingTurnkeyWallet,
+  parseAlreadyImportedWalletId,
+  fetchTurnkeyWalletAddress,
+} from './wallet/mpcAdapter.js';
 import { submitIntent, getRequest, loadRequest, updateRequest, insertSignPermit, signAndAdvance, assertSignPermit } from './wallet/requestLifecycle.js';
 import { setAutonomousMode } from './tools/setAutonomousMode.js';
 import { issueClientKey } from './auth/agentClient.js';
@@ -520,7 +528,7 @@ app.get('/', (req: Request, res: Response) => {
       </div>
       <div class="info-row">
         <span class="label">Connector URL</span>
-        <span class="value">https://mcp.northveil.xyz/sse</span>
+        <span class="value">https://mcp.northveil.xyz/mcp</span>
       </div>
       <div class="info-row">
         <span class="label">OAuth Gateway</span>
@@ -550,9 +558,14 @@ app.get('/', (req: Request, res: Response) => {
       sse: '/sse',
       openapi: '/openapi.json',
       health: '/health',
+      deps: '/health/deps',
     },
   });
 });
+
+export function getPrimaryMcpUrl(): string {
+  return 'https://mcp.northveil.xyz/mcp';
+}
 
 app.get('/health', (req: Request, res: Response) => {
   res.json({
@@ -563,6 +576,30 @@ app.get('/health', (req: Request, res: Response) => {
     timestamp: new Date().toISOString(),
   });
 });
+
+app.get('/health/deps', async (_req: Request, res: Response) => {
+  try {
+    const { error } = await supabase.from('email_otp').select('id').limit(1);
+    if (!error) {
+      return res.json({ supabase: 'ok' });
+    }
+    const msg = error.message || '';
+    if (/invalid api key/i.test(msg) || /SUPABASE_ADMIN_KEY_INVALID/i.test(msg)) {
+      return res.status(503).json({ supabase: 'invalid_api_key' });
+    }
+    if (/permission denied|row-level security|rls/i.test(msg)) {
+      return res.status(503).json({ supabase: 'rls' });
+    }
+    return res.status(503).json({ supabase: 'down' });
+  } catch (err: any) {
+    const msg = String(err?.message || err);
+    if (/invalid api key/i.test(msg) || /SUPABASE_ADMIN_KEY_INVALID/i.test(msg)) {
+      return res.status(503).json({ supabase: 'invalid_api_key' });
+    }
+    return res.status(503).json({ supabase: 'down' });
+  }
+});
+
 
 // -------------------------------------------------------------
 // Canonical MCP & Tool Dispatching (POST /mcp, POST /sse, POST /message)
@@ -1227,6 +1264,12 @@ app.patch('/wallet/grants/:id', requireSession, async (req: Request, res: Respon
 // -------------------------------------------------------------
 // Google OAuth Endpoints (Vite SPA Backend)
 // -------------------------------------------------------------
+export function walletRedirect(origin: string, q: Record<string, string>): string {
+  const u = new URL('/', origin);
+  for (const [k, v] of Object.entries(q)) u.searchParams.set(k, v);
+  return u.toString();
+}
+
 function getGoogleCallbackUrl(req: Request): string {
   if (process.env.GOOGLE_REDIRECT_URI) {
     return process.env.GOOGLE_REDIRECT_URI;
@@ -1249,9 +1292,7 @@ app.get('/auth/google/start', (req: Request, res: Response) => {
 
   if (!clientId) {
     try {
-      const targetUrl = new URL(redirect);
-      targetUrl.searchParams.set('error', 'GOOGLE_CLIENT_ID_NOT_CONFIGURED');
-      return res.redirect(targetUrl.toString());
+      return res.redirect(walletRedirect(redirect, { error: 'GOOGLE_CLIENT_ID_NOT_CONFIGURED' }));
     } catch {}
     return res.status(500).json({
       error: 'GOOGLE_CLIENT_ID_NOT_CONFIGURED',
@@ -1280,7 +1321,7 @@ app.get('/auth/google/callback', async (req: Request, res: Response) => {
   }
 
   if (!code) {
-    return res.redirect(`${redirectTarget}?error=OAUTH_CODE_MISSING`);
+    return res.redirect(walletRedirect(redirectTarget, { error: 'OAUTH_CODE_MISSING' }));
   }
 
   try {
@@ -1297,12 +1338,14 @@ app.get('/auth/google/callback', async (req: Request, res: Response) => {
       domain: isProd ? '.northveil.xyz' : undefined,
     });
 
-    const url = new URL(redirectTarget);
-    url.searchParams.set('sessionToken', sessionToken);
-    return res.redirect(url.toString());
+    return res.redirect(walletRedirect(redirectTarget, { sessionToken }));
   } catch (err: any) {
     console.error('[Northveil] Google OAuth callback error:', err);
-    return res.redirect(`${redirectTarget}?error=${encodeURIComponent(err.message || 'AUTH_FAILED')}`);
+    const msg = String(err?.message || err || '');
+    if (/invalid api key/i.test(msg) || /SUPABASE_ADMIN_KEY_INVALID/i.test(msg)) {
+      return res.redirect(walletRedirect(redirectTarget, { error: 'AUTH_DB_MISCONFIGURED' }));
+    }
+    return res.redirect(walletRedirect(redirectTarget, { error: 'AUTH_FAILED' }));
   }
 });
 
@@ -1316,7 +1359,9 @@ app.post('/auth/email/start', async (req: Request, res: Response) => {
     const result = await startEmailOtp(email, clientIp);
     return res.json(result);
   } catch (err: any) {
-    return res.status(err.statusCode || 400).json({ error: err.message || 'OTP_START_FAILED' });
+    const status = err.statusCode || err.status || 400;
+    const errCode = err.code || err.message || 'OTP_START_FAILED';
+    return res.status(status).json({ error: errCode, message: err.message });
   }
 });
 
@@ -1334,9 +1379,12 @@ app.post('/auth/email/verify', async (req: Request, res: Response) => {
     });
     return res.json(result);
   } catch (err: any) {
-    return res.status(err.statusCode || 400).json({ error: err.message || 'OTP_VERIFY_FAILED' });
+    const status = err.statusCode || err.status || 400;
+    const errCode = err.code || err.message || 'OTP_VERIFY_FAILED';
+    return res.status(status).json({ error: errCode, message: err.message });
   }
 });
+
 
 // -------------------------------------------------------------
 // WebAuthn Passkey Registration & Login Endpoints
@@ -1707,12 +1755,7 @@ app.post('/wallet/import/finish', requireSession, async (req: Request, res: Resp
   }
 
   try {
-    const mpc = getMpcProvider();
-    if (typeof mpc.importFinish !== 'function') {
-      return res.status(501).json({ error: 'IMPORT_NOT_SUPPORTED', message: 'Signer provider does not support importFinish' });
-    }
-
-    const imported = await mpc.importFinish(userId, { encryptedBundle, name });
+    const imported = await importFinishOrAttach(userId, { encryptedBundle, name });
 
     const { count } = await supabase
       .from('wallets')
@@ -1723,7 +1766,7 @@ app.post('/wallet/import/finish', requireSession, async (req: Request, res: Resp
 
     const { data: inserted, error } = await supabase
       .from('wallets')
-      .insert({
+      .upsert({
         user_id: userId,
         name: name || (isPrimary ? 'Primary Vault' : 'Imported Vault'),
         is_primary: isPrimary,
@@ -1732,11 +1775,17 @@ app.post('/wallet/import/finish', requireSession, async (req: Request, res: Resp
         mpc_provider: 'turnkey',
         mpc_wallet_id: imported.mpcWalletId,
         status: 'active',
-      })
+      }, { onConflict: 'mpc_wallet_id' })
       .select('*')
       .single();
 
-    if (error) throw error;
+    if (error) {
+      const msg = String(error.message || error);
+      if (/invalid api key/i.test(msg) || /SUPABASE_ADMIN_KEY_INVALID/i.test(msg)) {
+        return res.status(503).json({ error: 'AUTH_DB_MISCONFIGURED', message: 'Northveil auth database is misconfigured. Try again in a minute.' });
+      }
+      throw error;
+    }
 
     // Link passkey to wallet: append wallet.id to passkeys.wallet_ids for this user
     try {
@@ -1766,6 +1815,10 @@ app.post('/wallet/import/finish', requireSession, async (req: Request, res: Resp
       wallet: inserted,
     });
   } catch (err: any) {
+    const msg = String(err?.message || err);
+    if (/invalid api key/i.test(msg) || /SUPABASE_ADMIN_KEY_INVALID/i.test(msg)) {
+      return res.status(503).json({ error: 'AUTH_DB_MISCONFIGURED', message: 'Northveil auth database is misconfigured. Try again in a minute.' });
+    }
     return res.status(500).json({ error: err.message || 'IMPORT_FINISH_FAILED' });
   }
 });
@@ -1795,19 +1848,65 @@ app.get('/wallet/me', requireSession, async (req: Request, res: Response) => {
       user = { id: dbUser.id, email: dbUser.email, name: dbUser.name, avatarUrl: dbUser.avatar_url };
     }
 
-    const { data: wallets } = await supabase
+    let { data: wallets, error: walletsErr } = await supabase
       .from('wallets')
       .select('id, name, address, chain_family, mpc_wallet_id, is_primary, status')
       .eq('user_id', user.id)
-      .eq('status', 'active')
+      .in('status', ['active', 'imported', 'ready'])
       .order('is_primary', { ascending: false });
 
-    const { count: passkeyCount } = await supabase
+    if (walletsErr) {
+      const msg = String(walletsErr.message || walletsErr);
+      if (/invalid api key/i.test(msg) || /SUPABASE_ADMIN_KEY_INVALID/i.test(msg)) {
+        return res.status(503).json({ error: 'AUTH_DB_MISCONFIGURED', message: 'Northveil auth database is misconfigured. Try again in a minute.' });
+      }
+      throw walletsErr;
+    }
+
+    let safeWallets = wallets ?? [];
+
+    // Also attach orphans:
+    // If Turnkey org already has a wallet created/imported for this user and Postgres has zero rows,
+    // call attachExistingTurnkeyWallet(userId) once and insert the row.
+    if (safeWallets.length === 0) {
+      try {
+        const attached = await attachExistingTurnkeyWallet(user.id);
+        if (attached) {
+          const { data: inserted, error: insErr } = await supabase
+            .from('wallets')
+            .upsert({
+              user_id: user.id,
+              name: 'Primary Vault',
+              address: attached.address.toLowerCase(),
+              chain_family: 'evm',
+              mpc_provider: 'turnkey',
+              mpc_wallet_id: attached.mpcWalletId,
+              status: 'active',
+              is_primary: true,
+            }, { onConflict: 'mpc_wallet_id' })
+            .select('id, name, address, chain_family, mpc_wallet_id, is_primary, status')
+            .single();
+          if (!insErr && inserted) {
+            safeWallets = [inserted];
+          }
+        }
+      } catch (attachErr: any) {
+        console.warn('[Northveil] attachExistingTurnkeyWallet in /wallet/me notice:', attachErr?.message);
+      }
+    }
+
+    const { count: passkeyCount, error: pkErr } = await supabase
       .from('passkeys')
       .select('id', { count: 'exact', head: true })
       .eq('user_id', user.id);
 
-    const safeWallets = wallets ?? [];
+    if (pkErr) {
+      const msg = String(pkErr.message || pkErr);
+      if (/invalid api key/i.test(msg) || /SUPABASE_ADMIN_KEY_INVALID/i.test(msg)) {
+        return res.status(503).json({ error: 'AUTH_DB_MISCONFIGURED', message: 'Northveil auth database is misconfigured. Try again in a minute.' });
+      }
+    }
+
     const safePasskeyCount = passkeyCount ?? 0;
 
     const next =
@@ -1827,9 +1926,14 @@ app.get('/wallet/me', requireSession, async (req: Request, res: Response) => {
       authenticated: true,
     });
   } catch (err: any) {
-    return res.status(500).json({ error: err.message });
+    const msg = String(err?.message || err || '');
+    if (/invalid api key/i.test(msg) || /SUPABASE_ADMIN_KEY_INVALID/i.test(msg)) {
+      return res.status(503).json({ error: 'AUTH_DB_MISCONFIGURED', message: 'Northveil auth database is misconfigured. Try again in a minute.' });
+    }
+    return res.status(500).json({ error: err.message || 'INTERNAL_ERROR' });
   }
 });
+
 
 // GET pending approvals for wallet or user
 app.get(['/wallet/approvals/pending', '/api/v1/dashboard/approvals/pending'], async (req: Request, res: Response) => {

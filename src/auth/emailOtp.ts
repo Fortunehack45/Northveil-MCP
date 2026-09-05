@@ -30,8 +30,17 @@ export function checkEmailRateLimit(email: string): boolean {
   if (bucket.timestamps.length >= 3) {
     return false; // Max 3 codes / email / 15 min
   }
-  bucket.timestamps.push(Date.now());
   return true;
+}
+
+export function recordEmailRateLimit(email: string): void {
+  const norm = email.toLowerCase().trim();
+  let bucket = emailAttempts.get(norm);
+  if (!bucket) {
+    bucket = { timestamps: [] };
+    emailAttempts.set(norm, bucket);
+  }
+  bucket.timestamps.push(Date.now());
 }
 
 export function checkIpRateLimit(ip: string): boolean {
@@ -45,9 +54,19 @@ export function checkIpRateLimit(ip: string): boolean {
   if (bucket.timestamps.length >= 10) {
     return false; // Max 10 / IP / hour
   }
-  bucket.timestamps.push(Date.now());
   return true;
 }
+
+export function recordIpRateLimit(ip: string): void {
+  if (!ip) return;
+  let bucket = ipAttempts.get(ip);
+  if (!bucket) {
+    bucket = { timestamps: [] };
+    ipAttempts.set(ip, bucket);
+  }
+  bucket.timestamps.push(Date.now());
+}
+
 
 export function resetRateLimitsForTesting() {
   emailAttempts.clear();
@@ -146,16 +165,18 @@ export async function countPasskeys(userId: string): Promise<number> {
  * Counts active MPC wallets for a user
  */
 export async function countWallets(userId: string): Promise<number> {
-  const { count, data, error } = await supabase
+  const { data, error } = await supabase
     .from('wallets')
-    .select('*', { count: 'exact' })
-    .eq('user_id', userId)
-    .eq('status', 'active');
+    .select('id,status,mpc_wallet_id')
+    .eq('user_id', userId);
   if (error) {
-    console.warn('[Northveil OTP] countWallets error:', error.message);
-    return 0;
+    const msg = String(error.message || error);
+    if (/invalid api key/i.test(msg) || msg.includes('SUPABASE_ADMIN_KEY_INVALID')) {
+      throw new HttpError(503, 'AUTH_DB_MISCONFIGURED', 'Northveil auth database is misconfigured. Try again in a minute.');
+    }
+    throw error;
   }
-  return typeof count === 'number' ? count : ((data as any)?.length || 0);
+  return (data || []).filter((w) => w.status !== 'revoked' && w.status !== 'deleted').length;
 }
 
 /**
@@ -179,10 +200,25 @@ export async function upsertIdentity(opts: {
 }) {
   const email = opts.email.trim().toLowerCase();
 
-  const { data: byEmail } = await supabase.from("users").select("*").ilike("email", email).maybeSingle();
-  const { data: bySub } = opts.googleSub
+  const { data: byEmail, error: errEmail } = await supabase.from("users").select("*").ilike("email", email).maybeSingle();
+  if (errEmail) {
+    const msg = String(errEmail.message || errEmail);
+    if (/invalid api key/i.test(msg) || msg.includes('SUPABASE_ADMIN_KEY_INVALID')) {
+      throw new HttpError(503, 'AUTH_DB_MISCONFIGURED', 'Northveil auth database is misconfigured. Try again in a minute.');
+    }
+    throw errEmail;
+  }
+
+  const { data: bySub, error: errSub } = opts.googleSub
     ? await supabase.from("users").select("*").eq("google_sub", opts.googleSub).maybeSingle()
-    : { data: null };
+    : { data: null, error: null };
+  if (errSub) {
+    const msg = String(errSub.message || errSub);
+    if (/invalid api key/i.test(msg) || msg.includes('SUPABASE_ADMIN_KEY_INVALID')) {
+      throw new HttpError(503, 'AUTH_DB_MISCONFIGURED', 'Northveil auth database is misconfigured. Try again in a minute.');
+    }
+    throw errSub;
+  }
 
   if (byEmail && bySub && byEmail.id !== bySub.id) {
     await supabase.from("wallets").update({ user_id: byEmail.id }).eq("user_id", bySub.id);
@@ -234,7 +270,13 @@ export async function upsertIdentity(opts: {
     last_login_at: new Date().toISOString(),
   }).select("*").single();
 
-  if (error) throw error;
+  if (error) {
+    const msg = String(error.message || error);
+    if (/invalid api key/i.test(msg) || msg.includes('SUPABASE_ADMIN_KEY_INVALID')) {
+      throw new HttpError(503, 'AUTH_DB_MISCONFIGURED', 'Northveil auth database is misconfigured. Try again in a minute.');
+    }
+    throw error;
+  }
   return created;
 }
 
@@ -254,7 +296,7 @@ export async function startEmailOtp(email: string, clientIp?: string): Promise<{
   }
   const normEmail = email.toLowerCase().trim();
 
-  // 1. Rate Limiting
+  // 1. Rate Limiting Check (do not record timestamp until persisted)
   if (!checkEmailRateLimit(normEmail)) {
     throw new HttpError(429, 'RATE_LIMIT_EXCEEDED: Max 3 codes per 15 minutes');
   }
@@ -298,10 +340,24 @@ export async function startEmailOtp(email: string, clientIp?: string): Promise<{
   }
 
   if (insertError) {
+    const msg = String(insertError?.message || insertError || '');
+    if (/invalid api key/i.test(msg) || msg.includes('SUPABASE_ADMIN_KEY_INVALID')) {
+      throw new HttpError(503, 'AUTH_DB_MISCONFIGURED', 'Northveil auth database is misconfigured. Try again in a minute.');
+    }
+    if (/relation ".*email_otp" does not exist|email_otp.*missing/i.test(msg) || insertError?.code === '42P01') {
+      console.error('[Northveil OTP] email_otp table missing in database:', msg);
+      throw new HttpError(503, 'AUTH_DB_MISCONFIGURED', 'Northveil auth database is misconfigured. Try again in a minute.');
+    }
     throw new HttpError(500, `OTP_PERSISTENCE_FAILED: ${insertError.message || insertError}`);
   }
 
-  // 4. Send email
+  // 4. Rate limit consume: record timestamp only AFTER successful insert
+  recordEmailRateLimit(normEmail);
+  if (clientIp) {
+    recordIpRateLimit(clientIp);
+  }
+
+  // 5. Send email
   const apiKey = process.env.RESEND_API_KEY;
   const emailSent = await sendEmailCode(normEmail, code);
 
@@ -318,6 +374,7 @@ export async function startEmailOtp(email: string, clientIp?: string): Promise<{
       : {}),
   };
 }
+
 
 /**
  * Verifies Email OTP Code

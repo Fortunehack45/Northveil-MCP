@@ -45,18 +45,23 @@ export async function handleDynamicClientRegistration(body: any): Promise<{
   const clientId = 'claude_' + crypto.randomBytes(8).toString('hex');
   const clientName = body?.client_name || 'Claude';
 
-  try {
-    await supabase.from('oauth_clients').insert({
-      id: clientId,
-      client_name: clientName,
-      name: clientName,
-      allowed_redirect_uris: allowed,
-      redirect_uri_prefixes: allowed,
-      token_endpoint_auth_method: 'none',
-    });
-  } catch (err: any) {
-    console.warn('[Northveil] OAuth client registration db notice:', err?.message);
+  const { error } = await supabase.from('oauth_clients').insert({
+    id: clientId,
+    client_name: clientName,
+    name: clientName,
+    allowed_redirect_uris: allowed,
+    redirect_uri_prefixes: allowed,
+    token_endpoint_auth_method: 'none',
+  });
+
+  if (error) {
+    console.error('[OAuth] oauth_dcr_fail:', error.message);
+    const err: any = new Error('DCR_PERSISTENCE_FAILED: ' + error.message);
+    err.statusCode = 500;
+    throw err;
   }
+
+  console.info('[OAuth] oauth_dcr_ok', { clientId, clientName });
 
   return {
     client_id: clientId,
@@ -85,19 +90,24 @@ export async function saveAuthCode(opts: {
       redirect_uri: opts.redirect_uri,
     });
   }
-  try {
-    await supabase.from('oauth_codes').insert({
-      code_hash: codeHash,
-      client_id: opts.client_id,
-      user_id: opts.user_id,
-      redirect_uri: opts.redirect_uri,
-      code_challenge: opts.code_challenge,
-      code_challenge_method: 'S256',
-      scope: 'mcp',
-      used: false,
-      expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
-    });
-  } catch {}
+  const { error } = await supabase.from('oauth_codes').insert({
+    code_hash: codeHash,
+    client_id: opts.client_id,
+    user_id: opts.user_id,
+    redirect_uri: opts.redirect_uri,
+    code_challenge: opts.code_challenge,
+    code_challenge_method: 'S256',
+    scope: 'mcp',
+    used: false,
+    expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+  });
+
+  if (error) {
+    console.error('[OAuth] saveAuthCode database failure:', error.message);
+    throw new Error(`OAUTH_CODE_PERSISTENCE_FAILED: ${error.message}`);
+  }
+
+  console.info('[OAuth] oauth_code_saved', { clientId: opts.client_id, userId: opts.user_id });
 }
 
 /**
@@ -155,20 +165,24 @@ export async function insertOauthToken(opts: {
   client_id: string;
   expires_at: Date;
 }): Promise<void> {
-  try {
-    await supabase.from('oauth_tokens').insert({
-      token_hash: opts.token_hash,
-      refresh_hash: opts.refresh_hash || null,
-      user_id: opts.user_id,
-      client_id: opts.client_id,
-      scope: 'mcp',
-      status: 'active',
-      expires_at: opts.expires_at.toISOString(),
-    });
-  } catch (err: any) {
-    console.warn('[Northveil] insertOauthToken db notice:', err?.message);
+  const { error } = await supabase.from('oauth_tokens').insert({
+    token_hash: opts.token_hash,
+    refresh_hash: opts.refresh_hash || null,
+    user_id: opts.user_id,
+    client_id: opts.client_id,
+    scope: 'mcp',
+    status: 'active',
+    expires_at: opts.expires_at.toISOString(),
+  });
+
+  if (error) {
+    console.error('[OAuth] insertOauthToken database failure:', error.message);
+    throw new Error(`OAUTH_TOKEN_PERSISTENCE_FAILED: ${error.message}`);
   }
+
+  console.info('[OAuth] oauth_token_issued', { clientId: opts.client_id, userId: opts.user_id });
 }
+
 
 /**
  * Ensures an agent_clients row exists for the OAuth client bound to the user

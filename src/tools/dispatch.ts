@@ -15,6 +15,8 @@ export async function executeTool(name: string, args: Record<string, any>, req: 
   // Public inspection tools (no wallet context required)
   if (name === 'nv_health') {
     return {
+      ok: true,
+      url: 'https://mcp.northveil.xyz/mcp',
       status: 'ok',
       system: 'Northveil Non-Custodial Control Plane',
       custody: 'none',
@@ -22,6 +24,7 @@ export async function executeTool(name: string, args: Record<string, any>, req: 
       timestamp: new Date().toISOString(),
     };
   }
+
 
   if (name === 'nv_list_networks') {
     return {
